@@ -1,0 +1,11 @@
+{
+  "functions": "src/convex",
+  "generateCommonJSApi": true,
+  "node": {
+    "externalPackages": ["livekit-server-sdk"]
+  },
+  "codegen": {
+    "staticApi": true,
+    "staticDataModel": true
+  }
+}

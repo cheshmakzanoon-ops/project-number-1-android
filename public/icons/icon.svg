@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3a281c"/>
+      <stop offset="100%" stop-color="#1a130d"/>
+    </linearGradient>
+    <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f6b26b"/>
+      <stop offset="100%" stop-color="#ea8a3e"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffdf9e"/>
+      <stop offset="100%" stop-color="#f59e5b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="252" r="150" fill="#2a1d13" opacity="0.55"/>
+  <path
+    fill="url(#ember)"
+    d="M256 400c-66 0-118-46-118-106 0-62 52-104 104-168 20 30 32 46 42 70 14-8 30-9 46-4-14 32-26 51-28 76 30-10 56-28 75-54 18 38 8 104-42 150-26 24-52 36-79 36z"
+  />
+  <path
+    fill="url(#core)"
+    d="M256 356c-38 0-68-28-68-62 0-34 30-58 60-96 11 18 17 26 23 38 10 8 22 12 34 13-8 14-15 24-16 34 10 2 18 5 26 9-12 25-34 64-59 64z"
+  />
+  <circle cx="205" cy="352" r="10" fill="#fff" opacity="0.18"/>
+</svg>

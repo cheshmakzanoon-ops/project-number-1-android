@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+@theme {
+  --color-dusk-50: #fbf5ec;
+  --color-dusk-100: #f4e9d9;
+  --color-dusk-200: #e8d5ba;
+  --color-dusk-300: #d8b98f;
+  --color-dusk-400: #c09a6e;
+  --color-dusk-500: #a87d4f;
+  --color-dusk-600: #8a6340;
+  --color-dusk-700: #6d4d34;
+  --color-dusk-800: #4a3424;
+  --color-dusk-900: #2e2118;
+  --color-dusk-950: #1a130d;
+
+  --color-ember-300: #f8c98a;
+  --color-ember-400: #f59e5b;
+  --color-ember-500: #ea8a3e;
+  --color-ember-600: #d06d24;
+  --color-ember-700: #a9521a;
+
+  --color-sage-300: #b7d8c0;
+  --color-sage-400: #7fb692;
+  --color-sage-500: #5d9c73;
+  --color-sage-600: #477e5a;
+  --color-sage-700: #366447;
+
+  --font-persian: "Vazirmatn", "Manrope", system-ui, -apple-system, sans-serif;
+  --font-sans: "Vazirmatn", "Manrope", system-ui, system-ui, sans-serif;
+
+  --radius-card: 1.75rem;
+  --radius-bubble: 1.25rem;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--color-dusk-50);
+    color: var(--color-dusk-950);
+    font-family: var(--font-persian);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  * {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Persian digits in time/numeric contexts render crisply in the UI font. */
+  input,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+}
+
+/* warm ambient gradients like the original "paper" feel */
+.paper {
+  background-image:
+    radial-gradient(
+      1100px 520px at 20% -10%,
+      rgba(234, 138, 62, 0.10),
+      transparent 60%
+    ),
+    radial-gradient(
+      900px 600px at 100% 115%,
+      rgba(93, 156, 115, 0.08),
+      transparent 55%
+    );
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--color-dusk-200);
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* App-like safe-area + mobile envelope */
+.safe-area {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+@keyframes ink-bloom {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.animate-ink {
+  animation: ink-bloom 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes ring-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(234, 138, 62, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 18px rgba(234, 138, 62, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(234, 138, 62, 0);
+  }
+}
+.animate-ring {
+  animation: ring-pulse 1.4s cubic-bezier(0.2, 0.6, 0.4, 1) infinite;
+}
+
+@keyframes fade-slide {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-rise {
+  animation: fade-slide 0.28s ease-out both;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-ring,
+  .animate-rise,
+  .animate-ink {
+    animation: none !important;
+  }
+}
