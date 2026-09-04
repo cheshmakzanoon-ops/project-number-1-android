@@ -65,8 +65,12 @@ export function CallOverlay({
     return () => document.removeEventListener("fullscreenchange", onFullscreen);
   }, []);
 
-  const joinedPeers = session.peers.filter((p) => p.joined);
-  const firstPeer = session.peers[0];
+  // Defensive: a session built from a row is always normalized to have a
+  // peers array, but a crash here unmounts the app to a black screen — so
+  // never trust it blindly.
+  const sessionPeers = session.peers ?? [];
+  const joinedPeers = sessionPeers.filter((p) => p.joined);
+  const firstPeer = sessionPeers[0];
   // Who this screen is "about": the caller for an incoming ring, the person
   // being called for an outgoing one, and the single other person (or a
   // generic label) mid-call.
@@ -80,8 +84,8 @@ export function CallOverlay({
     : joinedPeers.length === 1
       ? joinedPeers[0].themeColor
       : firstPeer?.themeColor ?? "#8a6340";
-  const isGroup = session.peers.length > 1;
-  const groupCount = session.peers.length + 1; // includes me
+  const isGroup = sessionPeers.length > 1;
+  const groupCount = sessionPeers.length + 1; // includes me
 
   // Keep the screen awake during a call (Zoom-style "always on") where the
   // browser supports the Screen Wake Lock API. No-op on iOS Safari.
@@ -207,7 +211,7 @@ export function CallOverlay({
           </h2>
           {isGroup && !incoming && (
             <p className="mt-1 max-w-[19rem] truncate text-sm text-white/55">
-              {session.peers.map((p) => p.displayName).join("، ")}
+              {sessionPeers.map((p) => p.displayName).join("، ")}
             </p>
           )}
           <p className="mt-3 text-center text-lg text-white/70">
@@ -339,7 +343,7 @@ export function CallOverlay({
 
             {/* participant list */}
             <div className="mt-6 flex w-full max-w-sm flex-col items-center gap-2">
-              {session.peers
+              {sessionPeers
                 .filter((p) => p.joined)
                 .map((peer) => {
                   const live = kit.remotes.find((r) => r.userId === peer.userId);
@@ -408,7 +412,7 @@ function VideoStage({
   session: CallSession;
   elapsed: number;
 }) {
-  const joinedPeers = session.peers.filter((p) => p.joined);
+  const joinedPeers = (session.peers ?? []).filter((p) => p.joined);
   const videoSources = joinedPeers.filter((peer) => {
     const live = kit.remotes.find((r) => r.userId === peer.userId);
     return Boolean(live && (live.cam || live.screen));
@@ -435,8 +439,8 @@ function VideoStage({
     return (
       <div className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(circle_at_50%_30%,#2e2118,#0f0a06)]">
         <Avatar
-          name={session.peers[0]?.displayName ?? session.callerName}
-          color={session.peers[0]?.themeColor ?? session.callerColor}
+          name={session.peers?.[0]?.displayName ?? session.callerName}
+          color={session.peers?.[0]?.themeColor ?? session.callerColor}
           size={116}
         />
         <p className="mt-4 text-sm text-white/55">در انتظار پیوستن بقیه…</p>

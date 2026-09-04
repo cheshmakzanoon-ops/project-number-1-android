@@ -102,7 +102,53 @@ type CallRow = {
   acceptedByMe: boolean;
   caller: { userId: Id<"users">; displayName: string; themeColor: string } | null;
   peers: CallPeer[];
+  /**
+   * Legacy (pre-group) backend rows named the other participant directly and
+   * had no `peers`/`caller`/`acceptedByMe`. During a rolling deploy the
+   * backend can answer with either shape for a while — the client must never
+   * crash on the old one (a hard crash unmounts React and leaves the phone
+   * on a black screen). Everything below reads rows only through the
+   * normalizers, which synthesize a single peer from the legacy fields.
+   */
+  otherName?: string;
+  otherColor?: string;
 };
+
+/** A valid, non-empty peer list for a call row (never undefined, never empty
+ * when the legacy fields name someone). */
+function peersOf(call: CallRow): CallPeer[] {
+  if (Array.isArray(call.peers) && call.peers.length > 0) return call.peers;
+  if (call.otherName) {
+    return [
+      {
+        // Legacy rows carry no id for the other person; an empty id just
+        // means media lookups never match it (avatar-only UI shows fine).
+        userId: (call.caller?.userId ?? "") as Id<"users">,
+        displayName: call.otherName,
+        themeColor: call.otherColor ?? "#8a6340",
+        // The old backend had no per-participant join state — an active row
+        // meant the other side had picked up.
+        joined: call.status === "active",
+      },
+    ];
+  }
+  return [];
+}
+
+/** The person this row is about, across both backend shapes. */
+function callerOf(call: CallRow): { userId: Id<"users">; displayName: string; themeColor: string } | null {
+  if (call.caller) return call.caller;
+  // Old rows only name the other participant; from the callee's side that
+  // other person IS the caller.
+  if (!call.initiatedByMe && call.otherName) {
+    return {
+      userId: ("" as Id<"users">),
+      displayName: call.otherName,
+      themeColor: call.otherColor ?? "#8a6340",
+    };
+  }
+  return null;
+}
 
 /**
  * Result of a media-connect attempt:
@@ -1013,16 +1059,17 @@ export function useCallkit(token: string | null): GarmaCallkit {
   /** Build the session object a screen should show for a given call row. */
   const sessionForRow = useCallback(
     (call: CallRow, phase: "outgoing" | "incoming" | "active", joinOffer = false): CallSession => {
+      const caller = callerOf(call);
       return {
         callId: call.callId,
         phase,
         kind: call.kind,
         initiatedByMe: call.initiatedByMe,
         joinOffer,
-        callerId: call.caller?.userId,
-        callerName: call.caller?.displayName ?? "…",
-        callerColor: call.caller?.themeColor ?? "#8a6340",
-        peers: call.peers,
+        callerId: caller?.userId,
+        callerName: caller?.displayName ?? "…",
+        callerColor: caller?.themeColor ?? "#8a6340",
+        peers: peersOf(call),
       };
     },
     [],
@@ -1043,23 +1090,26 @@ export function useCallkit(token: string | null): GarmaCallkit {
     }
 
     // Keep a live session's caller/peer list in step with the server (new
-    // people joining a group call, names, join states).
+    // people joining a group call, names, join states). Rows are normalized
+    // so a legacy backend shape (no peers/caller) can never crash this — a
+    // crash here unmounts React and leaves a black screen on the phone.
     if (cur && curCall) {
       const row = myCalls.find((c) => c.callId === curCall);
       if (row) {
+        const rowCaller = callerOf(row);
+        const rowPeers = peersOf(row);
         const changed =
-          cur.callerName !== (row.caller?.displayName ?? "…") ||
-          cur.callerColor !== (row.caller?.themeColor ?? "#8a6340") ||
-          cur.peers.length !== row.peers.length ||
+          cur.callerName !== (rowCaller?.displayName ?? "…") ||
+          cur.callerColor !== (rowCaller?.themeColor ?? "#8a6340") ||
+          cur.peers.length !== rowPeers.length ||
           cur.peers.some(
-            (p, i) =>
-              p.userId !== row.peers[i]?.userId || p.joined !== row.peers[i]?.joined,
+            (p, i) => p.userId !== rowPeers[i]?.userId || p.joined !== rowPeers[i]?.joined,
           );
         // The callee answered our outgoing call: flip to the active phase.
         if (row.status === "active" && cur.phase === "outgoing") {
           stopRing();
           clearRingTtl();
-          setSession({ ...cur, phase: "active", peers: row.peers });
+          setSession({ ...cur, phase: "active", peers: rowPeers });
         } else if (
           row.status === "active" &&
           cur.phase === "incoming" &&
@@ -1070,16 +1120,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
           // stop ringing and offer a quiet join instead.
           stopRing();
           clearRingTtl();
-          setSession({ ...cur, joinOffer: true, peers: row.peers });
+          setSession({ ...cur, joinOffer: true, peers: rowPeers });
         }
         if (changed) {
           setSession((prev) =>
             prev
               ? {
                   ...prev,
-                  callerName: row.caller?.displayName ?? prev.callerName,
-                  callerColor: row.caller?.themeColor ?? prev.callerColor,
-                  peers: row.peers,
+                  callerName: rowCaller?.displayName ?? prev.callerName,
+                  callerColor: rowCaller?.themeColor ?? prev.callerColor,
+                  peers: rowPeers,
                 }
               : prev,
           );

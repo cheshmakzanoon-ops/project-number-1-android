@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
 import "./index.css";
 import { App } from "./App";
+import { ErrorBoundary } from "./lib/ErrorBoundary";
 
 const address = resolveConvexUrl();
 const client = new ConvexReactClient(address);
@@ -54,8 +55,13 @@ function resolveConvexUrl(): string {
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ConvexProvider client={client}>
-      <App />
-    </ConvexProvider>
+    {/* A crash anywhere (render, effect, Convex query) shows a recovery panel
+        instead of unmounting the tree onto the dark page behind it — which
+        otherwise reads as a frozen black screen on phones. */}
+    <ErrorBoundary>
+      <ConvexProvider client={client}>
+        <App />
+      </ConvexProvider>
+    </ErrorBoundary>
   </StrictMode>,
 );

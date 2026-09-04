@@ -245,17 +245,18 @@ export function App() {
   let pillName = "";
   let pillColor = "#8a6340";
   if (session) {
-    const joined = session.peers.filter((p) => p.joined);
-    const target = joined[0] ?? (session.initiatedByMe ? session.peers[0] : null);
+    const peers = session.peers ?? [];
+    const joined = peers.filter((p) => p.joined);
+    const target = joined[0] ?? (session.initiatedByMe ? peers[0] : null);
     if (session.phase === "incoming" && !session.initiatedByMe) {
       pillName = session.callerName;
       pillColor = session.callerColor;
     } else if (target) {
       pillName = target.displayName;
       pillColor = target.themeColor;
-    } else if (session.peers.length > 0) {
-      pillName = session.peers[0].displayName;
-      pillColor = session.peers[0].themeColor;
+    } else if (peers.length > 0) {
+      pillName = peers[0].displayName;
+      pillColor = peers[0].themeColor;
     } else {
       pillName = "تماس";
     }
