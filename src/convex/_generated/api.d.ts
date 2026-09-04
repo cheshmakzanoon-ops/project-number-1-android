@@ -126,6 +126,12 @@ export declare const api: {
       { otherId: Id<"users">; token: string },
       any
     >;
+    startGroup: FunctionReference<
+      "mutation",
+      "public",
+      { memberIds: Array<Id<"users">>; token: string },
+      any
+    >;
   };
   livekit: {
     getToken: FunctionReference<

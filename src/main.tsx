@@ -15,10 +15,21 @@ const client = new ConvexReactClient(address);
  *   derive that from window.location instead of the container-local localhost.
  */
 // Service worker makes the app installable as a home-screen app and keeps a
-// working shell offline. Registered only in production builds.
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
+// working shell offline. Registered in every environment (including the dev
+// preview) so the browser treats the page as installable and fires
+// `beforeinstallprompt` — without it the in-app install offer would never
+// appear when someone opens the app URL in the preview.
+if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    // updateViaCache: "none" makes the browser re-fetch sw.js on every load
+    // instead of serving it from the HTTP cache — that byte comparison is
+    // what triggers a new worker install, and a new install is what swaps
+    // the app shell cache (icons/manifest/theme) on phones that installed
+    // the app before a rebrand. Without it an updated icon set could keep
+    // serving the old cached one for weeks.
+    navigator.serviceWorker
+      .register("/sw.js", { updateViaCache: "none" })
+      .catch(() => {});
   });
 }
 

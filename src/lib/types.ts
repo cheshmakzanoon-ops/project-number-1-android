@@ -14,6 +14,14 @@ export interface DirectoryEntry extends PublicUser {
   isMe: boolean;
 }
 
+/** One other member of a conversation (me excluded) — used to open chats and
+ * to describe who a call will ring. */
+export interface ConvPeer {
+  userId: Id<"users">;
+  displayName: string;
+  themeColor: string;
+}
+
 export interface ConvSummary {
   _id: Id<"conversations">;
   kind: "dm" | "group";

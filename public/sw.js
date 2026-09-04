@@ -2,8 +2,14 @@
  * Network-first with a runtime cache fallback for same-origin GET requests.
  * Live data always comes fresh when online; when offline the last-known
  * response (or the app shell) is used. Only registered in production builds.
+ *
+ * The cache name is the version stamp for the whole app shell (icons,
+ * manifest, index.html). Bump it whenever those assets change — the browser
+ * only re-installs this worker when sw.js itself changes bytes, and a fresh
+ * cache name is what actually evicts stale icons/shell from phones that
+ * already installed the app.
  */
-const CACHE = "garma-shell-v2";
+const CACHE = "garma-shell-v4";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -46,12 +52,15 @@ self.addEventListener("push", (event) => {
 
   event.waitUntil(
     (async () => {
-      // If the app is open and visible right now, skip the system
-      // notification — the app is already showing its own ring screen.
       const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      // Foreground client(s): the app itself shows the full ring screen
+      // (in-app ringtone + vibrate), so a second system notification would
+      // only double the noise. Every other state — closed, backgrounded,
+      // screen locked — goes through the OS notification below, which is
+      // exactly the "rings no matter what" path for an installed app.
       if (clients.some((c) => c.visibilityState === "visible")) return;
 
-      await self.registration.showNotification(data.title || "گرما", {
+      const notif = {
         // Body comes from the server so the wording matches the call kind
         // (video vs audio); keep a fallback for older pushes.
         body: data.body || "تماس ورودی",
@@ -61,8 +70,19 @@ self.addEventListener("push", (event) => {
         renotify: true,
         requireInteraction: true, // stays on screen until answered/dismissed
         vibrate: Array.isArray(data.vibrate) ? data.vibrate : [500, 200, 500, 200, 500],
-        data: { callId: data.callId, kind: data.kind },
-      });
+        data: { callId: data.callId, kind: data.kind, timestamp: data.timestamp || Date.now() },
+      };
+      try {
+        await self.registration.showNotification(data.title || "گرما", notif);
+      } catch {
+        // Some browsers reject when a previous identical-tag notification is
+        // still showing with requireInteraction; retry after closing it.
+        const existing = await self.registration.getNotifications({
+          tag: notif.tag,
+        });
+        for (const n of existing) n.close();
+        await self.registration.showNotification(data.title || "گرما", notif);
+      }
     })(),
   );
 });

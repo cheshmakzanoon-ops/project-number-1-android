@@ -1,12 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
 // livekit-client is imported lazily (see livekitLoader) so the app shell
 // never has to download it — it only loads once a call actually starts.
-import type {
-  Room,
-  TrackPublication,
-  VideoEncoding,
-} from "livekit-client";
+import type { Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
@@ -14,24 +10,54 @@ import type { Id } from "../convex/_generated/dataModel";
 export type CallPhase = "idle" | "outgoing" | "incoming" | "active";
 export type CallKind = "audio" | "video";
 
+/** One other person on/being rung for a call (me excluded). */
+export interface CallPeer {
+  userId: Id<"users">;
+  displayName: string;
+  themeColor: string;
+  /** True once they answered and are in the media room. */
+  joined: boolean;
+}
+
 export interface CallSession {
   callId: Id<"calls">;
   phase: CallPhase;
   kind: CallKind;
-  otherId?: Id<"users">;
-  otherName: string;
-  otherColor: string;
   initiatedByMe: boolean;
+  /**
+   * I was rung for a call that is ALREADY ACTIVE (someone else answered):
+   * this screen offers "join", it does not ring like a fresh incoming call.
+   */
+  joinOffer: boolean;
+  /** The person who started the call (who the incoming ring names). */
+  callerId?: Id<"users">;
+  callerName: string;
+  callerColor: string;
+  /** Everyone else in the conversation/call with their join state. */
+  peers: CallPeer[];
+}
+
+/** One remote participant's live media, keyed by their user id. */
+export interface RemotePeer {
+  userId: string;
+  displayName: string;
+  themeColor: string;
+  mic: MediaStream | null;
+  cam: MediaStream | null;
+  screen: MediaStream | null;
+  micOn: boolean;
+  camOn: boolean;
+  screenOn: boolean;
+  /** LiveKit scored their uplink to us as poor. */
+  poor: boolean;
 }
 
 export interface GarmaCallkit {
   session: CallSession | null;
   startCall: (
     conversationId: Id<"conversations">,
-    otherId: Id<"users">,
-    otherName: string,
-    otherColor: string,
     kind: CallKind,
+    peers: CallPeer[],
   ) => Promise<void>;
   accept: () => Promise<void>;
   decline: () => Promise<void>;
@@ -45,14 +71,15 @@ export interface GarmaCallkit {
   camOn: boolean;
   speakerOn: boolean;
   sharing: boolean;
-  remoteMicOn: boolean;
-  remoteCamOn: boolean;
-  /** LiveKit measured the remote peer's link to us as poor (their uplink). */
-  remotePoor: boolean;
+  /** True while the browser's share picker/capture is in flight. */
+  shareStarting: boolean;
+  /** Human-readable (Persian) screen-share failure, if the last attempt failed. */
+  shareError: string | null;
+  clearShareError: () => void;
   local: MediaStream | null;
-  remote: MediaStream | null;
   screenLocal: MediaStream | null;
-  screenRemote: MediaStream | null;
+  /** Live remote participants (in the media room, tracks flowing or muted). */
+  remotes: RemotePeer[];
   error: string | null;
   /** True while an accept/decline/hangup/start mutation is in flight. */
   busy: boolean;
@@ -60,12 +87,7 @@ export interface GarmaCallkit {
   reconnecting: boolean;
   /** Active camera tier label ("1080p" / "720p" / "480p"). */
   camQuality: string | null;
-  /**
-   * Cycle the camera quality between automatic and a fixed cap
-   * (auto -> 480p -> 720p -> 1080p -> auto). Tapping the in-call badge
-   * calls this. In "auto" the app follows the network + measured
-   * congestion; a fixed cap is respected even on fast links.
-   */
+  /** Cycle the camera quality between automatic and a fixed cap. */
   cycleQuality: () => void;
 }
 
@@ -76,9 +98,10 @@ type CallRow = {
   status: "ringing" | "active" | "ended" | "declined" | "missed";
   initiatorId: Id<"users">;
   startedAt: number;
-  otherName: string;
-  otherColor: string;
   initiatedByMe: boolean;
+  acceptedByMe: boolean;
+  caller: { userId: Id<"users">; displayName: string; themeColor: string } | null;
+  peers: CallPeer[];
 };
 
 /**
@@ -91,6 +114,24 @@ type ConnectResult = true | "retryable" | "unauthorized" | "livekit_not_configur
 
 function one(media: MediaStreamTrack | null | undefined): MediaStream | null {
   return media ? new MediaStream([media]) : null;
+}
+
+/**
+ * Dismiss the OS "incoming call" notification for a call (the one the service
+ * worker showed while the app was closed/backgrounded) once this screen has
+ * answered, declined or left it — otherwise it stays pinned in the tray and
+ * looks like the phone is still ringing.
+ */
+async function closeCallNotification(callId: string) {
+  try {
+    if (!("serviceWorker" in navigator)) return;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return;
+    const notifs = await reg.getNotifications({ tag: `incoming-call-${callId}` });
+    for (const n of notifs) n.close();
+  } catch {
+    /* noop */
+  }
 }
 
 /** Structural view of the Network Information API (not in TS's DOM lib). */
@@ -114,9 +155,6 @@ function netTier(effectiveType?: string): number {
 /**
  * The camera tier each network class starts at (and, in auto mode, may step
  * back up to): 2g/slow-2g → 180p, 3g → 480p, 4g/5g/WiFi/unknown → 1080p.
- * Choosing deliberately below what a link "should" carry keeps the call alive
- * through the real-world valleys of mobile networks instead of bursting and
- * then freezing.
  */
 const TIER_BY_NET_CLASS: ReadonlyArray<number> = [0, 1, 3];
 
@@ -133,14 +171,6 @@ function netCeilingTier(): number {
  * - 2g / slow-2g: 180p @ 12fps (~170 kbps — EDGE-class uplink floor)
  * - 3g:           480p @ 15fps (~450 kbps)
  * - 4g/5g/WiFi:   1080p @ 30fps (only when the link is truly healthy)
- *
- * Every tier publishes with LiveKit SIMULCAST (q/h spatial layers on top of
- * this "f" layer) + dynacast + adaptiveStream. That combination is what keeps
- * a weak receiver's picture moving: when their link congests, LiveKit hands
- * them a smaller layer instead of a frozen full-res frame, and it stops
- * forwarding layers nobody watches. `encoding.maxBitrate` caps the top layer
- * (and therefore the worst-case uplink) per tier — VP8 defaults would happily
- * burst far higher than a flaky 3G uplink can carry.
  */
 const CAM_TIERS: ReadonlyArray<{
   label: string;
@@ -174,13 +204,6 @@ const CAM_TIERS: ReadonlyArray<{
   },
 ];
 
-/**
- * Quality mode:
- * - "auto":  follow the network class AND measured congestion (default)
- * - fixed cap ("480p"/"720p"/"1080p"): pin the capture tier — useful when a
- *   link is fast but flaky/metered, or the phone is low-end.
- * The 180p tier is only ever used by "auto" as the emergency floor.
- */
 type CamMode = "auto" | "480p" | "720p" | "1080p";
 
 const MODE_KEY = "garma.cam.mode";
@@ -228,29 +251,23 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = "timeout"): Promise<T
 
 export function useCallkit(token: string | null): GarmaCallkit {
   const [session, setSession] = useState<CallSession | null>(null);
-  const [remote, setRemote] = useState<MediaStream | null>(null);
-  const [screenRemote, setScreenRemote] = useState<MediaStream | null>(null);
-  const [screenLocal, setScreenLocal] = useState<MediaStream | null>(null);
-  const [local, setLocal] = useState<MediaStream | null>(null);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(false);
   const [speakerOn, setSpeakerOn] = useState(true);
   const [sharing, setSharing] = useState(false);
-  const [remoteMicOn, setRemoteMicOn] = useState(true);
-  const [remoteCamOn, setRemoteCamOn] = useState(true);
-  const [remotePoor, setRemotePoor] = useState(false);
+  const [shareStarting, setShareStarting] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [camQuality, setCamQuality] = useState<string | null>(null);
+  const [local, setLocal] = useState<MediaStream | null>(null);
+  const [screenLocal, setScreenLocal] = useState<MediaStream | null>(null);
 
   const roomRef = useRef<Room | null>(null);
-  const micTrackRef = useRef<MediaStreamTrack | null>(null);
-  const camTrackRef = useRef<MediaStreamTrack | null>(null);
-  const screenTrackRef = useRef<MediaStreamTrack | null>(null);
   const lastCamIdRef = useRef<string>("");
-  const remoteAudioElsRef = useRef<Set<HTMLAudioElement>>(new Set());
   const busyRef = useRef(false);
+  const shareBusyRef = useRef(false);
   const sawCallRef = useRef(false);
   const ringRef = useRef<AudioContext | null>(null);
   const ringTimerRef = useRef<number | null>(null);
@@ -260,43 +277,113 @@ export function useCallkit(token: string | null): GarmaCallkit {
     sessionRef.current = session;
   }, [session]);
 
+  // ---- Per-remote-participant media --------------------------------------
+  // A call can have several remote participants now (group calls), each with
+  // their own mic/camera/screen tracks. Keyed by LiveKit identity (== user
+  // id); a version tick re-renders the snapshot below after any mutation.
+  interface Part {
+    userId: string;
+    micEls: Set<HTMLAudioElement>;
+    micStream: MediaStream | null;
+    camStream: MediaStream | null;
+    screenStream: MediaStream | null;
+    micOn: boolean;
+    camOn: boolean;
+    screenOn: boolean;
+    poor: boolean;
+  }
+  const partsRef = useRef<Map<string, Part>>(new Map());
+  const [partsTick, setPartsTick] = useState(0);
+  const commitParts = useCallback(() => setPartsTick((t) => t + 1), []);
+
+  const partOf = useCallback((userId: string): Part => {
+    let p = partsRef.current.get(userId);
+    if (!p) {
+      p = {
+        userId,
+        micEls: new Set(),
+        micStream: null,
+        camStream: null,
+        screenStream: null,
+        micOn: true,
+        camOn: true,
+        screenOn: false,
+        poor: false,
+      };
+      partsRef.current.set(userId, p);
+    }
+    return p;
+  }, []);
+
+  const partNames = useMemo(() => {
+    const map = new Map<string, { displayName: string; themeColor: string }>();
+    if (session) {
+      for (const p of session.peers) {
+        map.set(p.userId, { displayName: p.displayName, themeColor: p.themeColor });
+      }
+    }
+    return map;
+  }, [session]);
+
+  /** Snapshot of live remote media for the overlay, ordered by joined peers. */
+  const remotes: RemotePeer[] = useMemo(() => {
+    const joined = partsRef.current;
+    const out: RemotePeer[] = [];
+    for (const [userId, part] of joined) {
+      const meta = partNames.get(userId) ?? { displayName: "…", themeColor: "#8a6340" };
+      out.push({
+        userId,
+        displayName: meta.displayName,
+        themeColor: meta.themeColor,
+        mic: part.micStream,
+        cam: part.camStream,
+        screen: part.screenStream,
+        micOn: part.micOn,
+        camOn: part.camOn,
+        screenOn: part.screenOn,
+        poor: part.poor,
+      });
+    }
+    // Stable-ish order: peers that are already on the call first (they matter
+    // visually), then late joiners in arrival order.
+    out.sort((a, b) => {
+      const ja = session?.peers.find((p) => p.userId === a.userId)?.joined ? 0 : 1;
+      const jb = session?.peers.find((p) => p.userId === b.userId)?.joined ? 0 : 1;
+      if (ja !== jb) return ja - jb;
+      return 0;
+    });
+    return out;
+  }, [partsTick, partNames, session]);
+
   // ---- Adaptive camera quality state ----
   const camModeRef = useRef<CamMode>(loadCamMode());
-  /** The tier the camera is currently captured/published at. */
   const captureTierRef = useRef<number>(CAM_TIERS.length - 1);
   const tierBusyRef = useRef(false);
-  /**
-   * Whether the user wants the camera LIVE right now. Adapters (congestion
-   * stepping, network-tier changes, quality cycling) must respect this — they
-   * must never silently switch a deliberately-off camera back on.
-   */
   const camIntentRef = useRef(false);
-  /** Whether the user wants the mic LIVE right now (restored on rejoin). */
   const micIntentRef = useRef(true);
+  /** Whether THIS device is currently sharing its screen. */
+  const sharingRef = useRef(false);
+  const speakerOnRef = useRef(true);
+  speakerOnRef.current = speakerOn;
+  useEffect(() => {
+    sharingRef.current = sharing;
+  }, [sharing]);
   /**
    * The call this screen's user (or a local ring timeout) ended while its
-   * server row is still ringing/active (e.g. the end mutation failed on a
-   * dead link). The lifecycle reconcile below must not re-present/re-join
-   * that call; the ref is cleared once the row actually disappears from
-   * myCalls, and the end mutation is retried whenever connectivity returns.
+   * server row is still ringing/active. The lifecycle reconcile below must
+   * not re-present/re-join that call; the ref is cleared once the row
+   * actually disappears from myCalls, and the end mutation is retried
+   * whenever connectivity returns.
    */
   const leaveRef = useRef<{ callId: Id<"calls">; wanted: "ended" | "declined" | "missed" } | null>(null);
   // ---- App-level "never drop the call" machinery ----
-  // LiveKit's own reconnect never gives up (see the reconnectPolicy below).
-  // For the rarer case of a FULL disconnect (server restart, room closed,
-  // policy-less hard failure) these refs run an application-level rejoin loop
-  // that keeps retrying the same call until the user hangs up or the peer
-  // ends it — a call therefore never dies just because the network was dead
-  // for a while.
   const connectGenRef = useRef(0); // bumped on teardown → invalidates retries
   const connectTimerRef = useRef<number | null>(null);
   const connRetryDelayRef = useRef(1500);
   const connectMediaRef = useRef<
     (callId: Id<"calls">, kind: CallKind, opts?: { restoreState?: boolean }) => Promise<ConnectResult>
   >(async () => "retryable");
-  /** Fails an unanswered ring (incoming: missed, outgoing: timed out). */
   const ringTtlRef = useRef<number | null>(null);
-  /** Periodic sampler of the measured connection quality (auto degrade). */
   const qualityWatchRef = useRef<number | null>(null);
   const qualityCountsRef = useRef({ poor: 0, good: 0 });
 
@@ -306,16 +393,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const getToken = useAction(api.livekit.getToken);
   const notifyIncoming = useAction(api.push.notifyIncomingCall);
 
+  const clearShareError = useCallback(() => setShareError(null), []);
+
   /**
    * iOS/Safari only grant mic/camera if the request happens inside (or very
    * soon after) a user tap, before any slow network round-trips. We warm the
    * permission synchronously so the LiveKit connect that follows can't be
-   * blocked, then release the tracks — LiveKit re-requests and reuses the grant.
-   * Capped with a timeout so a stuck permission prompt can never wedge the UI.
+   * blocked, then release the tracks.
    */
   const primeMedia = useCallback(async (kind: CallKind) => {
-    // Start fetching the LiveKit bundle while the permission prompt is up, so
-    // the connect that follows it doesn't wait on a network fetch.
     void loadLiveKit().catch(() => {});
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
@@ -334,13 +420,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
     | CallRow[]
     | undefined;
 
-  const rebuildRemote = useCallback(() => {
-    const parts: MediaStreamTrack[] = [];
-    if (micTrackRef.current) parts.push(micTrackRef.current);
-    if (camTrackRef.current) parts.push(camTrackRef.current);
-    setRemote(parts.length ? new MediaStream(parts) : null);
-  }, []);
-
   const clearRingTtl = useCallback(() => {
     if (ringTtlRef.current != null) {
       window.clearTimeout(ringTtlRef.current);
@@ -356,26 +435,26 @@ export function useCallkit(token: string | null): GarmaCallkit {
   }, []);
 
   const teardown = useCallback(() => {
-    // Invalidate any scheduled rejoin attempt and cancel its timer.
     connectGenRef.current += 1;
     if (connectTimerRef.current != null) {
       window.clearTimeout(connectTimerRef.current);
       connectTimerRef.current = null;
     }
     connRetryDelayRef.current = 1500;
-    remoteAudioElsRef.current.forEach((el) => {
-      el.pause();
-      el.srcObject = null;
-    });
-    remoteAudioElsRef.current.clear();
+    for (const part of partsRef.current.values()) {
+      part.micEls.forEach((el) => {
+        el.pause();
+        el.srcObject = null;
+        el.remove();
+      });
+      part.micEls.clear();
+    }
+    partsRef.current.clear();
+    commitParts();
     clearRingTtl();
     clearQualityWatch();
     const room = roomRef.current;
     if (room) {
-      // Null the ref BEFORE disconnecting: every room event handler is scoped
-      // to "am I still the current room?", so the async Disconnected event
-      // that follows (sometimes seconds later) can never tear down a NEW call
-      // created in between. This was the root cause of the second call dying.
       roomRef.current = null;
       try {
         room.disconnect();
@@ -383,26 +462,23 @@ export function useCallkit(token: string | null): GarmaCallkit {
         /* noop */
       }
     }
-    micTrackRef.current = null;
-    camTrackRef.current = null;
-    screenTrackRef.current = null;
     lastCamIdRef.current = "";
-    setRemote(null);
-    setScreenRemote(null);
-    setScreenLocal(null);
     setLocal(null);
+    setScreenLocal(null);
     setMicOn(true);
     micIntentRef.current = true;
     setCamOn(false);
     camIntentRef.current = false;
     setSharing(false);
-    setRemoteMicOn(true);
-    setRemoteCamOn(true);
-    setRemotePoor(false);
+    sharingRef.current = false;
+    setShareError(null);
+    setShareStarting(false);
     setCamQuality(null);
     setReconnecting(false);
     qualityCountsRef.current = { poor: 0, good: 0 };
-  }, [clearQualityWatch, clearRingTtl]);
+    setError(null);
+    setSession(null);
+  }, [clearQualityWatch, clearRingTtl, commitParts]);
 
   const stopRing = useCallback(() => {
     if (ringTimerRef.current != null) {
@@ -426,19 +502,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
     ringRef.current = null;
   }, []);
 
-  // Any teardown must silence the ringtone, or a dropped call keeps beeping.
   const cleanup = useCallback(() => {
     teardown();
     stopRing();
     sawCallRef.current = false;
-    setSession(null);
   }, [teardown, stopRing]);
 
   /**
    * Classic analog-phone ring: a 440+480 Hz dual tone, rung for 2s then
-   * paused for 4s — the cadence every real phone uses, so an incoming call
-   * sounds like a phone ringing, not a beep. Also vibrates on phones that
-   * support the Vibration API (silent-switch independent).
+   * paused for 4s — the cadence every real phone uses. Also vibrates.
    */
   const startRing = useCallback(() => {
     stopRing();
@@ -460,7 +532,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
       o2.connect(gain);
       o1.start();
       o2.start();
-      // 2s ring / 4s silence, matching the standard ring cadence.
       const tone = () => {
         gain.gain.setTargetAtTime(0.22, ctx.currentTime, 0.02);
         window.setTimeout(() => {
@@ -488,26 +559,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
   /**
    * (Re)capture and publish the camera at a given tier. Used for the initial
    * publish, network upgrades/downgrades, congestion stepping and manual caps.
-   * Publish options explicitly carry simulcast + this tier's bitrate cap so
-   * the SFU always has lower spatial layers to offer a struggling receiver.
    */
   const captureCameraAt = useCallback(
     async (tier: number, opts?: { enable?: boolean }): Promise<boolean> => {
       const room = roomRef.current;
       if (!room || tierBusyRef.current) return false;
-      // A room only exists once the LiveKit bundle has loaded.
       const { Track } = livekit();
       const plan = CAM_TIERS[tier];
       if (!plan) return false;
-      // Camera adaptation is only meaningful during video calls — an audio
-      // call must never have its camera silently switched on by a network
-      // change.
       if (sessionRef.current?.kind !== "video") return false;
-      // `enable: true` marks an explicit turn-on (initial publish, the camera
-      // button). Every other caller — congestion stepping, network-tier
-      // change, quality cycling — must respect a camera the user switched OFF:
-      // silently flipping it back on mid-call would be a privacy shock. In
-      // that case we only remember the tier for when they next turn it on.
       if (opts?.enable) camIntentRef.current = true;
       else if (!camIntentRef.current) {
         captureTierRef.current = tier;
@@ -516,8 +576,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
       tierBusyRef.current = true;
       try {
         const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-        // A live track has to be stopped before it can be re-captured at new
-        // constraints (setCameraEnabled with a live track only unmutes).
         if (pub) await room.localParticipant.setCameraEnabled(false);
         await room.localParticipant.setCameraEnabled(
           true,
@@ -528,7 +586,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
         setCamQuality(plan.label);
         return true;
       } catch {
-        /* keep the current capture on failure */
         return false;
       } finally {
         tierBusyRef.current = false;
@@ -537,19 +594,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
     [],
   );
 
-  /** The tier this device should capture at right now, per mode + network. */
   const desiredTier = useCallback((): number => {
     const mode = camModeRef.current;
     if (mode === "auto") return netCeilingTier();
     return TIER_OF_MODE[mode];
   }, []);
 
-  /**
-   * Follow the Network Information API (Chrome/Android; no-op elsewhere):
-   * when the effective tier changes mid-call, re-capture to match — both
-   * directions. Congestion that the API doesn't report is handled by the
-   * per-call quality sampler in connectMedia.
-   */
   const adaptToNetwork = useCallback(async () => {
     if (camModeRef.current !== "auto") return;
     const room = roomRef.current;
@@ -566,11 +616,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
     return () => conn.removeEventListener?.("change", onNetChange);
   }, [adaptToNetwork]);
 
-  /**
-   * Cycle quality: auto -> 480p -> 720p -> 1080p -> auto. A fixed cap is a
-   * hard ceiling — good for metered/flaky "fast" links and low-end phones;
-   * back to "auto" resumes network + congestion adaptation.
-   */
   const cycleQuality = useCallback(() => {
     const next = CAM_CYCLE[(CAM_CYCLE.indexOf(camModeRef.current) + 1) % CAM_CYCLE.length];
     camModeRef.current = next;
@@ -584,12 +629,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
 
   /**
    * Application-level rejoin loop ("never drop the call"). Called when a
-   * media connect fails transiently (dead link during ring/answer) or when
-   * LiveKit fully disconnects (server restart / room closed). It keeps
-   * retrying the SAME call with capped backoff while the session is still
-   * alive; hangup, the peer ending the call, or teardown cancels it through
-   * connectGenRef. Every attempt mints a fresh LiveKit token, so long calls
-   * can never outlive a token's TTL either.
+   * media connect fails transiently or when LiveKit fully disconnects.
    */
   const scheduleConnectRetry = useCallback(
     (callId: Id<"calls">, kind: CallKind) => {
@@ -616,8 +656,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
             return;
           }
           if (res === "unauthorized" || res === "livekit_not_configured") {
-            // Permanent failure (server config/credentials): end for real and
-            // surface the reason (e.g. missing LiveKit keys) to the user.
             const cur = sessionRef.current;
             if (cur && cur.callId === callId) {
               setError(res);
@@ -634,7 +672,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
             }
             return;
           }
-          // Transient: the call stays up, try again with more backoff.
           scheduleConnectRetry(callId, kind);
         })();
       }, delay);
@@ -650,14 +687,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
       opts?: { restoreState?: boolean },
     ): Promise<ConnectResult> => {
       if (!token) return "retryable";
-      // Bring in the (cached) LiveKit module before touching any of its
-      // symbols — first connect pays the dynamic-import cost, everything
-      // after is instant.
       const LK = await loadLiveKit();
       const { Room, RoomEvent, Track, ConnectionQuality, ConnectionState } = LK;
-      // Already connected to this call's room (e.g. a scheduled retry that
-      // fired just after another path reconnected)? Don't connect twice —
-      // LiveKit would kick the older identity connection.
       const liveRoom = roomRef.current;
       if (liveRoom && liveRoom.state === ConnectionState.Connected) return true;
       let room: Room | null = null;
@@ -667,9 +698,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           20_000,
           "token_timeout",
         );
-        // A fresh call starts at the tier its network class allows; a REJOIN
-        // keeps whatever tier congestion had already settled on, so recovering
-        // from a dead spot doesn't burst back to full quality and freeze again.
         const startTier = opts?.restoreState ? captureTierRef.current : desiredTier();
         captureTierRef.current = startTier;
         setCamQuality(CAM_TIERS[startTier].label);
@@ -678,14 +706,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
           dynacast: true,
           publishDefaults: {
             videoCodec: "vp8",
-            // Opus resilience for phone networks: RED re-sends lost audio
-            // frames and DTX saves bandwidth during silence. Both keep voice
-            // intelligible on flaky mobile links.
             red: true,
             dtx: true,
-            // Three spatial layers (q/h/f). The SFU then forwards only what a
-            // given receiver's link can carry — a weak connection gets a
-            // smaller-but-moving picture instead of frozen full-res frames.
             simulcast: true,
             videoEncoding: CAM_TIERS[startTier].encoding,
           },
@@ -699,21 +721,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
             autoGainControl: true,
             channelCount: 1,
           },
-          // NEVER give up: an unbounded reconnect policy with capped, jittered
-          // backoff keeps retrying while the tab is alive, so a call that hits
-          // a dead spot (tunnel, elevator, dropped cell signal, ISP outage)
-          // resumes automatically whenever the network returns — even minutes
-          // later — instead of dying after the default ~10 attempts. Each
-          // attempt is bounded by LiveKit's own websocket/peer timeouts, so a
-          // half-open link can't wedge the loop. Real teardown (hangup, peer
-          // ended the call) still ends it: teardown() disconnects the room.
           reconnectPolicy: {
-            nextRetryDelayInMs: (ctx) =>
-              Math.min(2_000 * Math.pow(1.5, Math.min(ctx.retryCount, 10)), 20_000) +
+            nextRetryDelayInMs: (rctx) =>
+              Math.min(2_000 * Math.pow(1.5, Math.min(rctx.retryCount, 10)), 20_000) +
               Math.floor(Math.random() * 2_000),
           },
         });
-        // Register ref BEFORE connecting so early events find it.
         roomRef.current = room;
         const r: Room = room; // stable, narrowed handle for the handlers below
 
@@ -721,12 +734,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (roomRef.current !== r) return;
           if (publication.source === Track.Source.Camera) {
             setLocal(one(publication.track?.mediaStreamTrack));
-            // Keep the UI state in sync with the publication even when the
-            // track was enabled outside toggleCam (right after the room
-            // connects) or re-published muted after a reconnect.
             setCamOn(!publication.isMuted);
           } else if (publication.source === Track.Source.ScreenShare) {
             setScreenLocal(one(publication.track?.mediaStreamTrack));
+            setSharing(true);
+            sharingRef.current = true;
           } else if (publication.source === Track.Source.Microphone) {
             setMicOn(!publication.isMuted);
           }
@@ -734,69 +746,82 @@ export function useCallkit(token: string | null): GarmaCallkit {
         room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
           if (roomRef.current !== r) return;
           if (publication.source === Track.Source.Camera) setLocal(null);
-          else if (publication.source === Track.Source.ScreenShare) setScreenLocal(null);
+          else if (publication.source === Track.Source.ScreenShare) {
+            setScreenLocal(null);
+            setSharing(false);
+            sharingRef.current = false;
+          }
         });
-        room.on(RoomEvent.TrackSubscribed, (track, publication) => {
+
+        room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
           if (roomRef.current !== r) return;
+          const uid = participant?.identity ?? "?";
+          const part = partOf(uid);
           if (publication.source === Track.Source.Microphone) {
-            micTrackRef.current = track.mediaStreamTrack;
-            setRemoteMicOn(!publication.isMuted);
+            part.micStream = new MediaStream([track.mediaStreamTrack]);
+            part.micOn = !publication.isMuted;
+            // Remote voice plays through a dedicated element (per person) —
+            // video tiles stay muted so audio is never doubled/phasey.
             const audio = track.attach() as HTMLAudioElement;
             audio.autoplay = true;
             audio.setAttribute("playsinline", "true");
-            audio.volume = speakerOn ? 1 : 0;
+            audio.volume = speakerOnRef.current ? 1 : 0;
             document.body.appendChild(audio);
-            remoteAudioElsRef.current.add(audio);
+            part.micEls.add(audio);
           } else if (publication.source === Track.Source.Camera) {
-            camTrackRef.current = track.mediaStreamTrack;
-            setRemoteCamOn(!publication.isMuted);
+            part.camStream = new MediaStream([track.mediaStreamTrack]);
+            part.camOn = !publication.isMuted;
           } else if (publication.source === Track.Source.ScreenShare) {
-            screenTrackRef.current = track.mediaStreamTrack;
-            setScreenRemote(one(track.mediaStreamTrack));
+            part.screenStream = new MediaStream([track.mediaStreamTrack]);
+            part.screenOn = true;
           }
-          rebuildRemote();
+          commitParts();
         });
-        room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
+        room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
           if (roomRef.current !== r) return;
+          const uid = participant?.identity ?? "?";
+          const part = partOf(uid);
           if (publication.source === Track.Source.Microphone) {
             track.detach().forEach((element) => {
-              remoteAudioElsRef.current.delete(element as HTMLAudioElement);
+              part.micEls.delete(element as HTMLAudioElement);
               element.remove();
             });
-            micTrackRef.current = null;
-            setRemoteMicOn(true);
+            part.micStream = null;
+            part.micOn = true;
           } else if (publication.source === Track.Source.Camera) {
-            camTrackRef.current = null;
-            setRemoteCamOn(true);
+            part.camStream = null;
+            part.camOn = true;
           } else if (publication.source === Track.Source.ScreenShare) {
-            screenTrackRef.current = null;
-            setScreenRemote(null);
+            part.screenStream = null;
+            part.screenOn = false;
           }
-          rebuildRemote();
+          commitParts();
         });
-        // Only remote track mutes matter here. Our own mute/unmute must never
-        // flip the partner's badges (this was previously a timing guess and
-        // could misfire whenever a re-capture took longer than 500ms).
+        // Only remote track mutes matter here.
         const isLocalPub = (publication: TrackPublication) =>
           r.localParticipant.getTrackPublications().includes(publication);
-        room.on(RoomEvent.TrackMuted, (publication) => {
+        room.on(RoomEvent.TrackMuted, (publication, participant) => {
           if (roomRef.current !== r || isLocalPub(publication)) return;
-          if (publication.source === Track.Source.Camera) setRemoteCamOn(false);
-          else if (publication.source === Track.Source.Microphone) setRemoteMicOn(false);
+          const part = partOf(participant?.identity ?? "?");
+          if (publication.source === Track.Source.Camera) part.camOn = false;
+          else if (publication.source === Track.Source.Microphone) part.micOn = false;
+          commitParts();
         });
-        room.on(RoomEvent.TrackUnmuted, (publication) => {
+        room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
           if (roomRef.current !== r || isLocalPub(publication)) return;
-          if (publication.source === Track.Source.Camera) setRemoteCamOn(true);
-          else if (publication.source === Track.Source.Microphone) setRemoteMicOn(true);
+          const part = partOf(participant?.identity ?? "?");
+          if (publication.source === Track.Source.Camera) part.camOn = true;
+          else if (publication.source === Track.Source.Microphone) part.micOn = true;
+          commitParts();
         });
-        // LiveKit scores the remote peer's link to us (their uplink -> SFU ->
-        // us) every few seconds. Surface a sustained poor reading so the UI
-        // can explain why their picture is blurry/frozen instead of leaving
-        // the caller to blame their own phone.
+        // LiveKit scores each remote participant's link to us — a poor
+        // reading explains why THEIR picture is blurry/frozen.
         room.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
           if (roomRef.current !== r) return;
           if (!participant || participant === r.localParticipant) return;
-          setRemotePoor(quality === ConnectionQuality.Poor || quality === ConnectionQuality.Lost);
+          const part = partOf(participant.identity);
+          part.poor = quality === ConnectionQuality.Poor || quality === ConnectionQuality.Lost;
+          commitParts();
         });
         room.on(RoomEvent.Reconnecting, () => {
           if (roomRef.current !== r) return;
@@ -806,11 +831,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (roomRef.current !== r) return;
           setReconnecting(false);
         });
-        // A FULL disconnect — server restarted / closed the room, or the
-        // socket was down so long the SFU dropped us. This must NOT end the
-        // call: while the Convex row is still ringing/active (nobody hung up)
-        // we rejoin the room in the background and keep the overlay alive.
-        // The per-room guard makes stale rooms inert.
+        // A FULL disconnect — server restarted / closed the room. This must
+        // NOT end the call: while the Convex row is still ringing/active we
+        // rejoin the room in the background and keep the overlay alive.
         room.on(RoomEvent.Disconnected, () => {
           if (roomRef.current !== r) return;
           const s = sessionRef.current;
@@ -822,19 +845,18 @@ export function useCallkit(token: string | null): GarmaCallkit {
             setError("connection_lost");
             return;
           }
-          // Forget the dead room's media; the rejoin re-publishes exactly
-          // what the user still has enabled (mic/camera intents below).
-          micTrackRef.current = null;
-          camTrackRef.current = null;
-          screenTrackRef.current = null;
-          remoteAudioElsRef.current.forEach((el) => {
-            el.pause();
-            el.srcObject = null;
-            el.remove();
-          });
-          remoteAudioElsRef.current.clear();
-          setRemote(null);
-          setScreenRemote(null);
+          for (const part of partsRef.current.values()) {
+            part.micEls.forEach((el) => {
+              el.pause();
+              el.srcObject = null;
+              el.remove();
+            });
+            part.micEls.clear();
+            part.micStream = null;
+            part.camStream = null;
+            part.screenStream = null;
+          }
+          commitParts();
           setScreenLocal(null);
           setLocal(null);
           setReconnecting(true);
@@ -842,10 +864,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           scheduleConnectRetry(s.callId, s.kind);
         });
 
-        // Generous initial-connection budget for the slowest links: up to 45s
-        // for the websocket + DTLS/ICE dance, with roomier per-step timeouts.
-        // A failure is classified as "retryable" and handed to the rejoin
-        // loop rather than killing the call.
         await withTimeout(
           r.connect(url, jwt, {
             maxRetries: 5,
@@ -856,18 +874,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
           "connect_timeout",
         );
 
-        // iOS/Safari gate media playback behind a user gesture; startAudio()
-        // resumes the playback context (harmless elsewhere, and needed so the
-        // callee actually hears the caller after tapping "پاسخ").
         try {
           await r.startAudio();
         } catch {
           /* noop */
         }
 
-        // A hangup / peer-end / teardown can land while this attempt was in
-        // flight. Check BEFORE publishing so a stale attempt never flashes
-        // the mic/camera on for a call that is no longer this device's call.
         if (sessionRef.current?.callId !== callId) {
           try {
             r.disconnect();
@@ -878,11 +890,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           return "retryable";
         }
 
-        // Publish mic always, camera for video calls — at the tier chosen for
-        // this connection. A fresh call starts with camera+mic on; a REJOIN
-        // (restoreState) publishes only what the user still has enabled, so a
-        // mute or a switched-off camera from mid-call is honored after an
-        // automatic reconnection instead of startling the other side.
         const restore = opts?.restoreState === true;
         const enableMic = restore ? micIntentRef.current : true;
         const enableCam = restore ? camIntentRef.current : kind === "video";
@@ -896,14 +903,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
           r.localParticipant.setMicrophoneEnabled(enableMic),
         ]);
 
-        // Measured-quality sampler (LiveKit estimates connection quality from
-        // real loss/jitter every few seconds — more honest than the coarse
-        // Network Information API). In auto mode, 2 consecutive poor samples
-        // (~10s) step the camera down a tier so the SFU keeps video flowing to
-        // the other side; 6 consecutive good samples (~30s of a healthy link)
-        // step it back up. Sampling is interval-driven because LiveKit only
-        // *emits* quality change events — a steady "poor" would otherwise
-        // never re-trigger.
+        // Measured-quality sampler: in auto mode, 2 consecutive poor samples
+        // (~10s) step the camera down a tier; 6 good ones step back up.
         qualityWatchRef.current = window.setInterval(() => {
           if (roomRef.current !== r) {
             clearQualityWatch();
@@ -917,8 +918,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (q === ConnectionQuality.Poor || q === ConnectionQuality.Lost) {
             c.poor += 1;
             c.good = 0;
-            // Downgrade fast (2 poor readings ≈ 10s): on a collapsing link a
-            // smaller-but-moving picture beats a frozen full-res one.
             if (c.poor >= 2 && captureTierRef.current > 0) {
               c.poor = 0;
               void captureCameraAt(captureTierRef.current - 1);
@@ -926,8 +925,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           } else {
             c.good += 1;
             c.poor = 0;
-            // Upgrade slowly (6 good readings ≈ 30s of a healthy link) and
-            // never past the ceiling the current network class allows.
             const ceiling = netCeilingTier();
             if (c.good >= 6 && captureTierRef.current < ceiling) {
               c.good = 0;
@@ -946,9 +943,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
         } catch {
           /* noop */
         }
-        // Classify: config/permission problems are permanent; everything else
-        // (timeouts, dead sockets, media failures) is retryable — the rejoin
-        // loop keeps the call alive through transient outages.
         const msg = e instanceof Error ? e.message : "";
         if (msg === "livekit_not_configured" || msg === "unauthorized") return msg;
         return "retryable";
@@ -958,11 +952,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
       captureCameraAt,
       cleanup,
       clearQualityWatch,
+      commitParts,
       desiredTier,
       getToken,
-      rebuildRemote,
+      partOf,
       scheduleConnectRetry,
-      speakerOn,
       token,
     ],
   );
@@ -970,17 +964,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
 
   /**
    * Re-join a call that has no live screen on this device yet: the app was
-   * (re)loaded while the call was ringing or already active. Starts a media
-   * connect for the given call and keeps the session/overlay consistent.
-   * Used only from the lifecycle reconcile below, which itself only fires
-   * when there is NO current session, so it can't race startCall/accept.
+   * (re)loaded while the call was ringing or already active.
    */
   const joinResume = useCallback(
     (call: CallRow, phase: "outgoing" | "active") => {
-      if (!token) return; // the reconcile only runs when a token exists
+      if (!token) return;
       setReconnecting(phase === "active");
-      // A start/accept/hangup owns the UI right now: hand the rejoin to the
-      // retry loop instead of racing it (and never leave the overlay stuck).
       if (busyRef.current) {
         scheduleConnectRetry(call.callId, call.kind);
         return;
@@ -995,8 +984,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           setReconnecting(false);
           setError(null);
         } else if (res === "unauthorized" || res === "livekit_not_configured") {
-          // Permanent failure (server config/credentials): end for real and
-          // surface the reason.
           setError(res);
           try {
             await endCallMut({
@@ -1009,7 +996,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           }
           cleanup();
         } else {
-          // Transient: keep the call up and rejoin in the background.
           setReconnecting(phase === "active");
           scheduleConnectRetry(call.callId, call.kind);
         }
@@ -1021,119 +1007,160 @@ export function useCallkit(token: string | null): GarmaCallkit {
   joinResumeRef.current = joinResume;
 
   // ---- Reconcile call lifecycle from Convex ----
-  // How long a ringing call is allowed to sit unanswered before it's treated
-  // as missed. Real timers (not query-driven checks): the Convex row never
-  // changes while a call rings unanswered, so a check gated on query updates
-  // would never fire and both screens would ring forever.
   const RING_TTL = 45_000;
   const CALLER_RING_TTL = 60_000;
 
+  /** Build the session object a screen should show for a given call row. */
+  const sessionForRow = useCallback(
+    (call: CallRow, phase: "outgoing" | "incoming" | "active", joinOffer = false): CallSession => {
+      return {
+        callId: call.callId,
+        phase,
+        kind: call.kind,
+        initiatedByMe: call.initiatedByMe,
+        joinOffer,
+        callerId: call.caller?.userId,
+        callerName: call.caller?.displayName ?? "…",
+        callerColor: call.caller?.themeColor ?? "#8a6340",
+        peers: call.peers,
+      };
+    },
+    [],
+  );
+
   useEffect(() => {
     if (!myCalls) return;
-    if (!token) return; // myCalls is only defined when a token exists
+    if (!token) return;
     const cur = sessionRef.current;
     const curCall = cur?.callId;
 
     // The current session's call disappeared server-side (peer hung up, they
     // declined, or it was retired as stale): tear the local session down.
     if (cur && curCall && !myCalls.some((c) => c.callId === curCall)) {
+      void closeCallNotification(curCall);
       if (sawCallRef.current) cleanup();
       return;
     }
+
+    // Keep a live session's caller/peer list in step with the server (new
+    // people joining a group call, names, join states).
+    if (cur && curCall) {
+      const row = myCalls.find((c) => c.callId === curCall);
+      if (row) {
+        const changed =
+          cur.callerName !== (row.caller?.displayName ?? "…") ||
+          cur.callerColor !== (row.caller?.themeColor ?? "#8a6340") ||
+          cur.peers.length !== row.peers.length ||
+          cur.peers.some(
+            (p, i) =>
+              p.userId !== row.peers[i]?.userId || p.joined !== row.peers[i]?.joined,
+          );
+        // The callee answered our outgoing call: flip to the active phase.
+        if (row.status === "active" && cur.phase === "outgoing") {
+          stopRing();
+          clearRingTtl();
+          setSession({ ...cur, phase: "active", peers: row.peers });
+        } else if (
+          row.status === "active" &&
+          cur.phase === "incoming" &&
+          !cur.initiatedByMe &&
+          !cur.joinOffer
+        ) {
+          // Someone else answered the group call I was still ringing for:
+          // stop ringing and offer a quiet join instead.
+          stopRing();
+          clearRingTtl();
+          setSession({ ...cur, joinOffer: true, peers: row.peers });
+        }
+        if (changed) {
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  callerName: row.caller?.displayName ?? prev.callerName,
+                  callerColor: row.caller?.themeColor ?? prev.callerColor,
+                  peers: row.peers,
+                }
+              : prev,
+          );
+        }
+      }
+    }
+
     const call = myCalls[0];
     if (!call) {
       if (cur && sawCallRef.current) cleanup();
-      // Nothing ringing/active anymore — any "leave" intent is fulfilled.
+      if (curCall) void closeCallNotification(curCall);
       leaveRef.current = null;
       return;
     }
     sawCallRef.current = true;
 
-    const ringing = call.status === "ringing";
-    const isIncomingForMe = !call.initiatedByMe;
-    const myPhase = cur?.phase ?? "idle";
-
-    // ---- Ring lifecycle guards ----
-    // These keep a ring honest when the screen that owns it is gone: a stale
-    // ring must never resurrect on a later app open, and a second call
-    // ringing in while we're already in one is declined instead of stacking.
-    if (ringing && curCall !== call.callId) {
-      const ttl = isIncomingForMe ? RING_TTL : CALLER_RING_TTL;
-      const age = Date.now() - call.startedAt;
-      // Already busy in another call (live session, or a still-active call
-      // this screen will resume after a reload): politely decline so the
-      // caller's phone stops ringing now instead of burning the full timeout.
-      const hasLiveCall =
-        !!cur || myCalls.some((c) => c.callId !== call.callId && c.status === "active");
-      if (hasLiveCall) {
+    // ----- A DIFFERENT call than my current one is ringing me ----------
+    if (cur && curCall !== call.callId) {
+      if (call.status === "ringing") {
+        // Busy (live session or another active call I must resume after a
+        // reload): politely decline so the caller's phone stops ringing now.
         void endCallMut({ callId: call.callId, token, status: "declined" });
         return;
       }
-      // The ring outlived its screen (app closed / relaunched too late):
+      // An active join-offer for another call while I'm busy: ignore it here;
+      // once my current call ends it will surface through the !cur branch.
+      return;
+    }
+    if (cur) return; // my own call is being presented already
+
+    // ----- No live screen: present whatever myCalls says is newest ---------
+    const ringing = call.status === "ringing";
+    const isIncomingForMe = !call.initiatedByMe;
+    const age = Date.now() - call.startedAt;
+
+    if (ringing) {
+      const ttl = isIncomingForMe ? RING_TTL : CALLER_RING_TTL;
+      // A ring that outlived its screen (app closed / relaunched too late):
       // close it as missed so it can never resurrect on the next launch.
       if (age > ttl) {
-        void endCallMut({ callId: call.callId, token, status: "missed" });
+        leaveRef.current = { callId: call.callId, wanted: "missed" };
+        void closeCallNotification(call.callId);
+        void endCallMut({ callId: call.callId, token, status: "missed" }).catch(() => {});
         return;
       }
       // The user already declined/hung up THIS call on this screen but the
       // end mutation hasn't landed yet (dead link): stay quiet until the row
-      // disappears instead of ringing it back. Retry the end whenever the
-      // subscription refreshes — cheap online, silent offline.
+      // disappears instead of ringing it back.
       const leave = leaveRef.current;
       if (leave && leave.callId === call.callId) {
         void endCallMut({ callId: call.callId, token, status: leave.wanted }).catch(() => {});
         return;
       }
-      // My own outgoing ring with no live screen (the app was relaunched
-      // while the call was still ringing): bring the ring back so the caller
-      // can see/hear it connect when the other side answers. The missed-call
-      // timer is re-armed with only the remaining TTL.
-      if (!isIncomingForMe && !cur) {
-        setSession({
-          callId: call.callId,
-          phase: "outgoing",
-          kind: call.kind,
-          otherName: call.otherName,
-          otherColor: call.otherColor,
-          initiatedByMe: true,
-        });
-        if (ringTtlRef.current == null) {
-          const remain = Math.max(500, ttl - age);
-          ringTtlRef.current = window.setTimeout(() => {
-            const s = sessionRef.current;
-            if (!s || s.callId !== call.callId || s.phase !== "outgoing") return;
-            // Mark this ring as over locally BEFORE the end mutation: if it
-            // fails on a dead link, don't re-present the call every re-render.
-            leaveRef.current = { callId: call.callId, wanted: "missed" };
-            void endCallMut({ callId: call.callId, token, status: "missed" });
-            cleanup();
-          }, remain);
-        }
+      // My own outgoing ring with no live screen (app relaunched while the
+      // call was still ringing): bring the ring back so I can see it connect
+      // when someone answers. Timer armed with only the remaining TTL.
+      if (!isIncomingForMe) {
+        setSession(sessionForRow(call, "outgoing"));          if (ringTtlRef.current == null) {
+            const remain = Math.max(500, ttl - age);
+            ringTtlRef.current = window.setTimeout(() => {
+              const s = sessionRef.current;
+              if (!s || s.callId !== call.callId || s.phase !== "outgoing") return;
+              leaveRef.current = { callId: call.callId, wanted: "missed" };
+              void closeCallNotification(call.callId);
+              void endCallMut({ callId: call.callId, token, status: "missed" });
+              cleanup();
+            }, remain);
+          }
         joinResumeRef.current(call, "outgoing");
         return;
       }
-      // Fresh incoming ring with no busy call: fall through and present it.
-    }
-
-    // A brand-new unanswered incoming ring: present it and arm the missed-call
-    // timer (only when the ring first appears, not on every query re-delivery).
-    if (isIncomingForMe && ringing && myPhase === "idle") {
-      setSession({
-        callId: call.callId,
-        phase: "incoming",
-        kind: call.kind,
-        otherName: call.otherName,
-        otherColor: call.otherColor,
-        initiatedByMe: false,
-      });
+      // Fresh incoming ring: present it, ring the phone, arm the missed-call
+      // timer (only when the ring first appears, not on every re-delivery).
+      setSession(sessionForRow(call, "incoming"));
       startRing();
       if (ringTtlRef.current == null) {
         ringTtlRef.current = window.setTimeout(() => {
           const s = sessionRef.current;
           if (!s || s.callId !== call.callId || s.phase !== "incoming") return;
-          // Mark this ring as over locally BEFORE the end mutation: if it
-          // fails on a dead link, don't re-ring it on the next re-render.
           leaveRef.current = { callId: call.callId, wanted: "missed" };
+          void closeCallNotification(call.callId);
           void endCallMut({ callId: call.callId, token, status: "missed" });
           cleanup();
         }, RING_TTL);
@@ -1141,45 +1168,45 @@ export function useCallkit(token: string | null): GarmaCallkit {
       return;
     }
 
-    // I was in an ACTIVE call and the app was (re)loaded while it was still
-    // live — nobody is ringing, we just need to rejoin the room and show the
-    // overlay again instead of stranding the other side in silence. Skipped
-    // when the user just hung up (leaveRef) — instead the end mutation is
-    // retried until the row actually dies.
-    if (call.status === "active" && !cur) {
-      const leave = leaveRef.current;
-      if (leave && leave.callId === call.callId) {
+    // Active call.
+    const inIt = call.acceptedByMe || call.initiatedByMe;
+    const leave = leaveRef.current;
+    if (leave && leave.callId === call.callId) {
+      // I just hung up/declined and the row is still alive (a group call that
+      // continued without me, or the end mutation hasn't landed): never
+      // re-join. Retry the end only if it was a full end request.
+      if (leave.wanted === "ended") {
         void endCallMut({ callId: call.callId, token, status: "ended" }).catch(() => {});
-        return;
       }
-      setSession({
-        callId: call.callId,
-        phase: "active",
-        kind: call.kind,
-        otherName: call.otherName,
-        otherColor: call.otherColor,
-        initiatedByMe: call.initiatedByMe,
-      });
+      return;
+    }
+    if (inIt) {
+      // I was in this ACTIVE call and the app was (re)loaded while it was
+      // still live — rejoin the room and show the overlay again.
+      setSession(sessionForRow(call, "active"));
       setReconnecting(true);
       joinResumeRef.current(call, "active");
       return;
     }
-
-    // The callee answered our outgoing call: flip to the active phase.
-    if (!isIncomingForMe && call.status === "active" && cur?.phase === "outgoing") {
-      stopRing();
-      clearRingTtl();
-      setSession({ ...cur, phase: "active" });
-    }
-  }, [myCalls, cleanup, startRing, stopRing, clearRingTtl, endCallMut, token]);
+    // I was rung but the call is already active (someone else answered):
+    // show a quiet join offer instead of a fresh ring.
+    setSession(sessionForRow(call, "incoming", true));
+  }, [
+    myCalls,
+    cleanup,
+    sessionForRow,
+    startRing,
+    stopRing,
+    clearRingTtl,
+    endCallMut,
+    token,
+  ]);
 
   const startCall = useCallback(
     async (
       conversationId: Id<"conversations">,
-      otherId: Id<"users">,
-      otherName: string,
-      otherColor: string,
       kind: CallKind,
+      peers: CallPeer[],
     ) => {
       // Re-entrancy guard: a double-tap on the call button must never create
       // two calls / two LiveKit rooms.
@@ -1195,23 +1222,27 @@ export function useCallkit(token: string | null): GarmaCallkit {
         } catch {
           return;
         }
-        setSession({ callId, phase: "outgoing", kind, otherId, otherName, otherColor, initiatedByMe: true });
+        setSession({
+          callId,
+          phase: "outgoing",
+          kind,
+          initiatedByMe: true,
+          joinOffer: false,
+          callerName: "",
+          callerColor: "",
+          peers,
+        });
         sawCallRef.current = false;
-        // A new call means any earlier "leave" intent is obsolete.
         leaveRef.current = null;
         // Ring every other device even if the app is closed there. Fire and
-        // forget — a push failure must never block the call itself. The
-        // server derives the callees from the call's participants.
+        // forget — a push failure must never block the call itself.
         void notifyIncoming({ token, callId, kind }).catch(() => {});
-        // If no one answers, hang up on our own after a while (a real timer —
-        // see RING_TTL note above). Guarded so it can't touch an active call.
         if (ringTtlRef.current == null) {
           ringTtlRef.current = window.setTimeout(() => {
             const s = sessionRef.current;
             if (!s || s.callId !== callId || s.phase !== "outgoing") return;
-            // Ring timed out with nobody answering — mark it over locally so
-            // a failed end mutation can't re-present it on the next render.
             leaveRef.current = { callId, wanted: "missed" };
+            void closeCallNotification(callId);
             void endCallMut({ callId, token, status: "missed" });
             cleanup();
           }, CALLER_RING_TTL);
@@ -1249,8 +1280,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
   );
 
   const accept = useCallback(async () => {
-    // Re-entrancy guard: repeated taps while getUserMedia/LiveKit connect are
-    // in flight must not answer twice or spawn parallel rooms.
     if (busyRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
@@ -1259,8 +1288,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     try {
       await primeMedia(s.kind);
       stopRing();
-      // The user responded, so the ring no longer needs a missed-call timer.
       clearRingTtl();
+      void closeCallNotification(s.callId);
       try {
         await answerCallMut({ callId: s.callId, token });
       } catch {
@@ -1268,7 +1297,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
       }
       const res = await connectMedia(s.callId, s.kind);
       if (res === true) {
-        setSession({ ...s, phase: "active" });
+        setSession({ ...s, phase: "active", joinOffer: false });
       } else if (res === "unauthorized" || res === "livekit_not_configured") {
         setError(res);
         try {
@@ -1278,15 +1307,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
         }
         cleanup();
       } else {
-        // The call is answered and alive — keep the active overlay up and
-        // rejoin in the background instead of dropping the callee.
-        setSession({ ...s, phase: "active" });
+        setSession({ ...s, phase: "active", joinOffer: false });
         setReconnecting(true);
         scheduleConnectRetry(s.callId, s.kind);
       }
     } finally {
-      // Always released — the timeout wrapper above guarantees the promise
-      // settles, so the accept button can never stay permanently disabled.
       busyRef.current = false;
       setBusy(false);
     }
@@ -1310,8 +1335,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setBusy(true);
     try {
       stopRing();
-      // Remember this call as "user left" BEFORE the end mutation resolves:
-      // if it fails on a dead link the reconcile must not re-present the ring.
+      void closeCallNotification(s.callId);
       leaveRef.current = { callId: s.callId, wanted: "declined" };
       try {
         await endCallMut({ callId: s.callId, token, status: "declined" });
@@ -1333,9 +1357,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setBusy(true);
     try {
       stopRing();
+      void closeCallNotification(s.callId);
       const wasActive = s.phase === "active";
-      // Remember this call as "user left": if the end mutation fails (dead
-      // link) the reconcile must not auto-rejoin a call they just hung up.
       leaveRef.current = { callId: s.callId, wanted: wasActive ? "ended" : "declined" };
       try {
         await endCallMut({ callId: s.callId, token, status: wasActive ? "ended" : "declined" });
@@ -1377,16 +1400,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
       setCamOn(false);
       return;
     }
-    // Turning back on: (re)capture at the tier the current quality mode /
-    // network dictates instead of the stale room defaults. captureCameraAt
-    // records the intent; the LocalTrackPublished event flips camOn when the
-    // track actually goes live.
     camIntentRef.current = true;
     if (await captureCameraAt(desiredTier(), { enable: true })) {
       setCamOn(true);
     } else {
-      // Couldn't publish (permission, no camera, capture already busy) — keep
-      // the switch state honest instead of showing a camera that isn't on.
       camIntentRef.current = false;
     }
   }, [camOn, captureCameraAt, desiredTier]);
@@ -1407,31 +1424,83 @@ export function useCallkit(token: string | null): GarmaCallkit {
     }
   }, []);
 
+  /**
+   * Screen share — hardened:
+   * - state is driven by the actual LiveKit publication events, so a failed
+   *   capture or a cancelled browser picker can never leave the UI believing
+   *   it is sharing (or believing it isn't while a track is live).
+   * - errors surface to the user in Persian instead of silently doing nothing.
+   * - double-taps are serialized; LiveKit's own pending-publication handling
+   *   would otherwise queue two captures on a fast double tap.
+   */
   const toggleShare = useCallback(async () => {
     const room = roomRef.current;
-    if (!room) return;
-    const next = !sharing;
+    if (!room || shareBusyRef.current) return;
+    shareBusyRef.current = true;
     try {
-      await room.localParticipant.setScreenShareEnabled(next, undefined, {
-        // Screen sharing is the hungriest thing on the link; publishing it
-        // without a cap could starve voice/video on a weak uplink. No capture
-        // resolution is requested on purpose: on Safari 17 specifying a
-        // resolution makes getDisplayMedia capture even lower than asked.
-        simulcast: false,
-        screenShareEncoding: { maxBitrate: 1_500_000, maxFramerate: 15 },
-      });
-      setSharing(next);
-    } catch {
-      /* noop */
+      const next = !sharingRef.current;
+      setShareError(null);
+      if (next) setShareStarting(true);
+      try {
+        const pub = await room.localParticipant.setScreenShareEnabled(
+          next,
+          {
+            // No resolution request on purpose: on Safari 17 specifying a
+            // resolution makes getDisplayMedia capture far below it.
+            audio: false,
+            selfBrowserSurface: "include",
+            surfaceSwitching: "include",
+          },
+          {
+            // Screen sharing is the hungriest thing on the link; publishing
+            // it uncapped could starve voice/video on a weak uplink. Single
+            // layer (simulcast off) keeps the SFU cost low for 2–3 viewers.
+            simulcast: false,
+            screenShareEncoding: { maxBitrate: 2_000_000, maxFramerate: 15 },
+          },
+        );
+        if (next && !pub && !sharingRef.current) {
+          setShareError("اشتراک صفحه شروع نشد؛ دوباره تلاش کن");
+        }
+      } catch (e) {
+        if (!next) {
+          // Stopping never really fails; ignore.
+        } else {
+          const name = e instanceof DOMException ? e.name : "";
+          const msg = e instanceof Error ? e.message : "";
+          setShareError(
+            name === "NotAllowedError" || /permission|cancel/i.test(msg)
+              ? "برای اشتراک صفحه باید اجازه بدهی"
+              : "اشتراک صفحه ممکن نشد؛ دوباره تلاش کن",
+          );
+        }
+        // Keep the UI honest even if LiveKit got confused: if no track is
+        // actually live, clear any stale sharing flag.
+        const existing = room.localParticipant.getTrackPublications().find(
+          (p) => p.source === "screen_share",
+        );
+        if (!existing && sharingRef.current) {
+          setSharing(false);
+          sharingRef.current = false;
+        }
+      } finally {
+        setShareStarting(false);
+        shareBusyRef.current = false;
+      }
+    } finally {
+      shareBusyRef.current = false;
     }
-  }, [sharing]);
+  }, []);
 
   const toggleSpeaker = useCallback(() => {
     setSpeakerOn((current) => {
       const next = !current;
-      remoteAudioElsRef.current.forEach((el) => {
-        el.volume = next ? 1 : 0;
-      });
+      speakerOnRef.current = next;
+      for (const part of partsRef.current.values()) {
+        part.micEls.forEach((el) => {
+          el.volume = next ? 1 : 0;
+        });
+      }
       return next;
     });
   }, []);
@@ -1451,17 +1520,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
     camOn,
     speakerOn,
     sharing,
-    remoteMicOn,
-    remoteCamOn,
+    shareStarting,
+    shareError,
+    clearShareError,
     local,
-    remote,
     screenLocal,
-    screenRemote,
+    remotes,
     error,
     busy,
     reconnecting,
     camQuality,
-    remotePoor,
     cycleQuality,
   };
 }

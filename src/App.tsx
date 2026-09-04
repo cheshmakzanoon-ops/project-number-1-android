@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { Bell, BellRing, X } from "lucide-react";
 import { api } from "./convex/_generated/api";
 import { getDeviceToken } from "./lib/token";
 import { Signup } from "./components/Signup";
 import { Lobby } from "./components/Lobby";
 import { Chat } from "./components/Chat";
 import { CallOverlay } from "./components/CallOverlay";
-import { useCallkit, type CallKind } from "./lib/useCallkit";
+import { InstallBanner } from "./components/InstallBanner";
+import { useCallkit, type CallKind, type CallPeer } from "./lib/useCallkit";
 import { usePush } from "./lib/usePush";
 import { Avatar } from "./components/Avatar";
 import {
@@ -15,14 +17,16 @@ import {
   saveCachedIdentity,
   type CachedIdentity,
 } from "./lib/identityCache";
+import type { ConvPeer, DirectoryEntry } from "./lib/types";
 import type { Id } from "./convex/_generated/dataModel";
-import type { DirectoryEntry } from "./lib/types";
 
 interface ActiveChat {
   cid: Id<"conversations">;
-  otherId: Id<"users">;
+  kind: "dm" | "group";
   name: string;
   color: string;
+  /** Everyone else in this conversation (for group calls / chat labels). */
+  peers: ConvPeer[];
 }
 
 export function App() {
@@ -39,6 +43,7 @@ export function App() {
   const me = queryMe ?? cachedMe;
   const register = useMutation(api.users.register);
   const startDM = useMutation(api.conversations.startDM);
+  const startGroup = useMutation(api.conversations.startGroup);
   const heartbeat = useMutation(api.users.heartbeat);
 
   const [active, setActive] = useState<ActiveChat | null>(null);
@@ -46,20 +51,11 @@ export function App() {
   const [authErr, setAuthErr] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
+  // "زنگ تماس" (notification) banner — hidden for this session after dismiss.
+  const [notifDismissed, setNotifDismissed] = useState(false);
   const callkit = useCallkit(token);
   const push = usePush(token);
   const { session } = callkit;
-
-  // Ask once for notification permission right after the user joins: without
-  // it we cannot ring this phone when the app is closed and someone calls.
-  const askedNotifRef = useRef(false);
-  useEffect(() => {
-    if (!me || askedNotifRef.current) return;
-    if (push.notifPerm !== "granted") {
-      askedNotifRef.current = true;
-      void push.enable();
-    }
-  }, [me, push]);
 
   // Keep the on-device identity in step with the server: cache it once the
   // query answers, drop it when the backend says this device is unknown (e.g.
@@ -74,8 +70,7 @@ export function App() {
   }, [queryMe]);
 
   // If the backend hasn't connected after a while, show a clear message rather
-  // than a silent endless spinner (or a stale cached shell), so a
-  // dead/filtered connection is obvious and recoverable from.
+  // than a silent endless spinner (or a stale cached shell).
   useEffect(() => {
     if (queryMe !== undefined) {
       setConnTrouble(false);
@@ -91,8 +86,7 @@ export function App() {
   }, [session]);
 
   // Presence heartbeat. Browsers throttle background tabs, so also beat the
-  // moment the tab becomes visible again or the network returns — presence
-  // should never lag behind what the app is actually doing.
+  // moment the tab becomes visible again or the network returns.
   useEffect(() => {
     if (!me) return;
     const beat = () => heartbeat({ token });
@@ -118,9 +112,6 @@ export function App() {
       try {
         await register({ token, displayName: name });
       } catch {
-        // The register mutation only fails on a dead connection (the request
-        // never reached the server) — tell the user plainly instead of letting
-        // the button silently do nothing.
         setAuthErr("نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       } finally {
         setBusy(false);
@@ -129,23 +120,41 @@ export function App() {
     [register, token],
   );
 
+  // ---- Opening conversations ---------------------------------------------
+
+  const openConv = useCallback(
+    (cid: Id<"conversations">, kind: "dm" | "group", name: string, color: string, peers: ConvPeer[]) => {
+      setActive({ cid, kind, name, color, peers });
+    },
+    [],
+  );
+
   const openChatWith = useCallback(
     async (c: DirectoryEntry) => {
       try {
         const cid = await startDM({ token, otherId: c._id });
-        setActive({ cid, otherId: c._id, name: c.displayName, color: c.themeColor });
+        openConv(
+          cid,
+          "dm",
+          c.displayName,
+          c.themeColor,
+          [{ userId: c._id, displayName: c.displayName, themeColor: c.themeColor }],
+        );
       } catch {
         /* noop */
       }
     },
-    [startDM, token],
+    [openConv, startDM, token],
   );
 
   const callContact = useCallback(
     async (c: DirectoryEntry, kind: CallKind) => {
       try {
         const cid = await startDM({ token, otherId: c._id });
-        await callkit.startCall(cid, c._id, c.displayName, c.themeColor, kind);
+        const peers: CallPeer[] = [
+          { userId: c._id, displayName: c.displayName, themeColor: c.themeColor, joined: false },
+        ];
+        await callkit.startCall(cid, kind, peers);
       } catch {
         /* noop */
       }
@@ -153,23 +162,38 @@ export function App() {
     [callkit, startDM, token],
   );
 
-  const callConversation = useCallback(
-    (convId: string, otherId: string, otherName: string, otherColor: string) => {
-      void callkit.startCall(
-        convId as Id<"conversations">,
-        otherId as Id<"users">,
-        otherName,
-        otherColor,
-        "video",
-      );
+  const callConv = useCallback(
+    (convId: Id<"conversations">, peers: ConvPeer[], kind: CallKind) => {
+      const callPeers: CallPeer[] = peers.map((p) => ({ ...p, joined: false }));
+      void callkit.startCall(convId, kind, callPeers);
     },
     [callkit],
   );
 
   const callActiveChat = useCallback(() => {
     if (!active) return;
-    void callkit.startCall(active.cid, active.otherId, active.name, active.color, "video");
-  }, [active, callkit]);
+    void callConv(active.cid, active.peers, "video");
+  }, [active, callConv]);
+
+  const callActiveChatAudio = useCallback(() => {
+    if (!active) return;
+    void callConv(active.cid, active.peers, "audio");
+  }, [active, callConv]);
+
+  const createGroup = useCallback(
+    async (members: ConvPeer[]) => {
+      if (members.length < 2) return;
+      try {
+        const cid = await startGroup({ token, memberIds: members.map((m) => m.userId) });
+        const name = members.map((m) => m.displayName).join("، ");
+        const color = members[0]?.themeColor ?? "#8a6340";
+        openConv(cid, "group", name, color, members);
+      } catch {
+        /* noop */
+      }
+    },
+    [openConv, startGroup, token],
+  );
 
   // ---- Render states ----
   const connTroubleScreen = (showPanel: boolean) => (
@@ -177,14 +201,14 @@ export function App() {
       <div className="flex flex-col items-center gap-4">
         {!showPanel && <div className="h-10 w-10 animate-pulse rounded-full bg-ember-400/50" />}
         {showPanel && (
-          <div className="animate-rise mx-6 max-w-xs rounded-3xl border border-dusk-100 bg-white/90 p-6 text-center shadow-xl backdrop-blur">
-            <p className="text-lg font-extrabold text-dusk-900">اتصال برقرار نشد</p>
-            <p className="mt-2 text-sm leading-6 text-dusk-500">
+          <div className="animate-rise mx-6 max-w-xs rounded-3xl border border-ember-300/25 bg-dusk-100/95 p-6 text-center shadow-2xl shadow-black/40 backdrop-blur">
+            <p className="text-lg font-extrabold text-dusk-950">اتصال برقرار نشد</p>
+            <p className="mt-2 text-sm leading-6 text-dusk-600">
               انگار به سرور وصل نمی‌شویم. اتصال اینترنت را بررسی کن و دوباره تلاش کن.
             </p>
             <button
               onClick={() => window.location.reload()}
-              className="mt-5 rounded-full bg-ember-500 px-7 py-3 font-bold text-white shadow-lg shadow-ember-500/30 transition hover:bg-ember-600 active:scale-95"
+              className="mt-5 rounded-full bg-ember-400 px-7 py-3 font-bold text-cocoa shadow-lg shadow-black/30 transition hover:bg-ember-300 active:scale-95"
             >
               تلاش دوباره
             </button>
@@ -194,75 +218,153 @@ export function App() {
     </div>
   );
 
-  // No connection and no (refreshed) identity: whatever the screen would show
-  // is stale, so surface the retry panel instead of a silent skeleton.
+  // No connection and no (refreshed) identity: surface the retry panel.
   if (connTrouble && queryMe === undefined) return connTroubleScreen(true);
-  // First visit on this device: nothing cached yet, so wait briefly for the
-  // backend to say whether this token is known.
+  // First visit on this device: nothing cached yet, wait briefly.
   if (queryMe === undefined && cachedMe === null) return connTroubleScreen(false);
   // The backend doesn't know this device token (fresh install / reset): sign up.
   if (queryMe === null) {
     return <Signup onRegister={handleRegister} busy={busy} error={authErr} />;
   }
 
-  // Past the gates above this is guaranteed: either the query answered with a
-  // user, or a cached identity stands in while the query refreshes.
   const identity = me as CachedIdentity;
 
+  // Notification permission banner: shown in production (push needs the real
+  // backend) until the user grants permission, so an installed app always has
+  // a working ring even when the app is closed. The request itself happens
+  // inside the button tap — iOS Safari only shows the permission prompt from
+  // a user gesture.
+  const showNotifBanner =
+    import.meta.env.PROD &&
+    !notifDismissed &&
+    me &&
+    "Notification" in window &&
+    push.notifPerm === "default";
+
+  // Minimized call pill title/avatar.
+  let pillName = "";
+  let pillColor = "#8a6340";
+  if (session) {
+    const joined = session.peers.filter((p) => p.joined);
+    const target = joined[0] ?? (session.initiatedByMe ? session.peers[0] : null);
+    if (session.phase === "incoming" && !session.initiatedByMe) {
+      pillName = session.callerName;
+      pillColor = session.callerColor;
+    } else if (target) {
+      pillName = target.displayName;
+      pillColor = target.themeColor;
+    } else if (session.peers.length > 0) {
+      pillName = session.peers[0].displayName;
+      pillColor = session.peers[0].themeColor;
+    } else {
+      pillName = "تماس";
+    }
+  }
+
   return (
-    <div className="mx-auto h-full max-w-md shadow-xl shadow-dusk-200/40" style={{ background: "var(--color-dusk-50)" }}>
-      {active ? (
-        <Chat
-          token={token}
-          meColor={identity.themeColor}
-          conversationId={active.cid}
-          name={active.name}
-          color={active.color}
-          onBack={() => setActive(null)}
-          onCall={callActiveChat}
-        />
-      ) : (
-        <Lobby
-          token={token}
-          meId={identity._id}
-          meName={identity.displayName}
-          onOpen={(cid, name, color, otherId) =>
-            setActive({
-              cid: cid as Id<"conversations">,
-              otherId: otherId as Id<"users">,
-              name,
-              color,
-            })
-          }
-          onCall={callConversation}
-          onMessageContact={openChatWith}
-          onVideoContact={(c) => callContact(c, "video")}
-          onAudioContact={(c) => callContact(c, "audio")}
-        />
+    <div
+      className="relative mx-auto flex h-full max-w-md flex-col shadow-xl shadow-black/50"
+      style={{ background: "var(--color-dusk-50)" }}
+    >
+      <InstallBanner />
+      {showNotifBanner && (
+        <div
+          role="status"
+          className="animate-rise relative z-30 mx-3 mt-2 flex items-center gap-3 rounded-2xl border border-sage-400/25 bg-gradient-to-l from-dusk-100/95 via-[#12231a]/95 to-dusk-100/95 px-3 py-2.5 shadow-lg shadow-black/40 backdrop-blur"
+        >
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-sage-600/90 text-white">
+            <BellRing size={17} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-extrabold text-dusk-950">زنگ تماس را روشن کن</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-dusk-600">
+              اگر اپ بسته باشد هم با این اجازه، تماس‌ها زنگ می‌زند و لرزش دارد.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void push.enable();
+            }}
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-sage-600 px-3.5 py-2 text-xs font-extrabold text-white shadow-md shadow-sage-600/30 transition hover:bg-sage-500 active:scale-95"
+          >
+            <Bell size={14} strokeWidth={2.5} />
+            روشن کن
+          </button>
+          <button
+            type="button"
+            onClick={() => setNotifDismissed(true)}
+            aria-label="بعداً"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-dusk-500 transition hover:bg-dusk-300/40 hover:text-dusk-700 active:scale-90"
+          >
+            <X size={15} />
+          </button>
+        </div>
       )}
 
+      <div className="flex min-h-0 flex-1 flex-col">
+        {active ? (
+          <Chat
+            token={token}
+            meColor={identity.themeColor}
+            meName={identity.displayName}
+            meId={identity._id}
+            conversationId={active.cid}
+            kind={active.kind}
+            name={active.name}
+            color={active.color}
+            onBack={() => setActive(null)}
+            onCallVideo={callActiveChat}
+            onCallAudio={callActiveChatAudio}
+          />
+        ) : (
+          <Lobby
+            token={token}
+            meId={identity._id}
+            meName={identity.displayName}
+            onOpen={(cid, kind, name, color, peers) =>
+              openConv(cid as Id<"conversations">, kind, name, color, peers)
+            }
+            onCall={callConv}
+            onMessageContact={openChatWith}
+            onVideoContact={(c) => callContact(c, "video")}
+            onAudioContact={(c) => callContact(c, "audio")}
+            onGroupCreate={(members) => {
+              void createGroup(members);
+            }}
+          />
+        )}
+      </div>
+
       {/* The overlay stays MOUNTED while minimized (invisible) so the call
-          timer keeps ticking and the media/connection keep flowing — unmount-
-          and-remount used to reset the elapsed timer on every restore. */}
+          timer keeps ticking and the media/connection keep flowing. */}
       {session && <CallOverlay kit={callkit} onMinimize={() => setMinimized(true)} hidden={minimized} />}
 
       {session && minimized && (
         <button
           onClick={() => setMinimized(false)}
-          className="fixed bottom-5 right-4 z-50 flex items-center gap-2 rounded-full bg-dusk-950/90 py-1.5 pl-4 pr-1.5 text-white shadow-2xl backdrop-blur transition active:scale-95"
+          className="fixed bottom-5 right-4 z-50 flex items-center gap-2 rounded-full bg-[#0e0803]/90 py-1.5 pl-4 pr-1.5 text-white shadow-2xl backdrop-blur transition active:scale-95"
         >
-          <Avatar name={session.otherName} color={session.otherColor} size={38} />
-          <span className="max-w-[90px] truncate text-sm font-bold">{session.otherName}</span>
+          <Avatar name={pillName} color={pillColor} size={38} />
+          <span className="max-w-[110px] truncate text-sm font-bold">{pillName}</span>
           <span className="flex items-center gap-1.5 text-xs text-sage-300">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sage-400" />
-            {session.kind === "video" ? "تماس تصویری" : "تماس صوتی"}
+            {session.phase === "active"
+              ? session.kind === "video"
+                ? "تماس تصویری"
+                : "تماس صوتی"
+              : session.joinOffer
+                ? "در جریان است"
+                : session.kind === "video"
+                  ? "تماس تصویری"
+                  : "تماس صوتی"}
           </span>
         </button>
       )}
 
       {callkit.error && !session && (
         <div className="safe-area fixed inset-x-0 top-0 z-[70] flex justify-center p-3">
-          <div className="animate-rise flex max-w-sm items-center gap-2 rounded-2xl bg-dusk-900 px-4 py-3 text-sm text-white shadow-2xl">
+          <div className="animate-rise flex max-w-sm items-center gap-2 rounded-2xl bg-rose-500/95 px-4 py-3 text-sm text-white shadow-2xl">
             <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-rose-500 text-xs font-black">!</span>
             {callkit.error === "livekit_not_configured"
               ? "تماس هنوز در دسترس نیست — کلیدهای تماس (LiveKit) را تنظیم کن."

@@ -102,6 +102,11 @@ export default defineSchema({
     callId: v.id("calls"),
     userId: v.id("users"),
     joinedAt: v.number(),
+    // When this member actually answered/joined the media room. Undefined
+    // while they are still being rung. Every member of a conversation gets a
+    // row when a call starts (so they can see the ring / join later), and a
+    // row only counts as "in the call" once acceptedAt is set.
+    acceptedAt: v.optional(v.number()),
     leftAt: v.optional(v.number()),
   })
     .index("by_call", ["callId"])

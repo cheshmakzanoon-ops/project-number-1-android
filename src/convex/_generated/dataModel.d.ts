@@ -29,6 +29,7 @@ import type { GenericId } from "convex/values";
 export type DataModel = {
   callParticipants: {
     document: {
+      acceptedAt?: number;
       callId: Id<"calls">;
       joinedAt: number;
       leftAt?: number;
@@ -37,7 +38,13 @@ export type DataModel = {
       _creationTime: number;
     };
     fieldPaths:
-      "_creationTime" | "_id" | "callId" | "joinedAt" | "leftAt" | "userId";
+      | "_creationTime"
+      | "_id"
+      | "acceptedAt"
+      | "callId"
+      | "joinedAt"
+      | "leftAt"
+      | "userId";
     indexes: {
       by_id: ["_id"];
       by_creation_time: ["_creationTime"];

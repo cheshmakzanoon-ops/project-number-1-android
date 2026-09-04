@@ -1,29 +1,46 @@
 @import "tailwindcss";
 
+/* ------------------------------------------------------------------
+   گرما — dark caramel-brown UI with honey-gold light.
+   `dusk-*` now runs from deep espresso (50) up to pale honey (950) so
+   the original "light surface / dark ink" component classes automatically
+   become "dark caramel surface / honey ink". Buttons and accents use the
+   `ember-*` honey-gold ramp; `sage-*` is a soft green for online/call.
+------------------------------------------------------------------- */
 @theme {
-  --color-dusk-50: #fbf5ec;
-  --color-dusk-100: #f4e9d9;
-  --color-dusk-200: #e8d5ba;
-  --color-dusk-300: #d8b98f;
-  --color-dusk-400: #c09a6e;
-  --color-dusk-500: #a87d4f;
-  --color-dusk-600: #8a6340;
-  --color-dusk-700: #6d4d34;
-  --color-dusk-800: #4a3424;
-  --color-dusk-900: #2e2118;
-  --color-dusk-950: #1a130d;
+  --color-dusk-50: #1a1008;
+  --color-dusk-100: #271a0e;
+  --color-dusk-200: #342415;
+  --color-dusk-300: #46311d;
+  --color-dusk-400: #5c4226;
+  --color-dusk-500: #8a6a44;
+  --color-dusk-600: #a9865f;
+  --color-dusk-700: #c9a678;
+  --color-dusk-800: #e3c493;
+  --color-dusk-900: #f5dda8;
+  --color-dusk-950: #fff3cf;
 
-  --color-ember-300: #f8c98a;
-  --color-ember-400: #f59e5b;
-  --color-ember-500: #ea8a3e;
-  --color-ember-600: #d06d24;
-  --color-ember-700: #a9521a;
+  --color-ember-50: #fff7e0;
+  --color-ember-100: #ffeec6;
+  --color-ember-200: #ffd98d;
+  --color-ember-300: #f2c069;
+  --color-ember-400: #e5a53f;
+  --color-ember-500: #d68f27;
+  --color-ember-600: #bf7620;
+  --color-ember-700: #9a5a15;
+  --color-ember-800: #7a4612;
 
-  --color-sage-300: #b7d8c0;
-  --color-sage-400: #7fb692;
-  --color-sage-500: #5d9c73;
-  --color-sage-600: #477e5a;
-  --color-sage-700: #366447;
+  --color-sage-50: #f0f8f1;
+  --color-sage-100: #e2f2e5;
+  --color-sage-200: #cde7d3;
+  --color-sage-300: #a8d3b4;
+  --color-sage-400: #86c29a;
+  --color-sage-500: #69ab7f;
+  --color-sage-600: #4f8d66;
+  --color-sage-700: #3d7050;
+
+  /* espresso ink used on honey-gold buttons */
+  --color-cocoa: #241203;
 
   --font-persian: "Vazirmatn", "Manrope", system-ui, -apple-system, sans-serif;
   --font-sans: "Vazirmatn", "Manrope", system-ui, system-ui, sans-serif;
@@ -37,6 +54,10 @@
   body,
   #root {
     height: 100%;
+  }
+
+  html {
+    background-color: var(--color-dusk-50);
   }
 
   body {
@@ -54,7 +75,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Persian digits in time/numeric contexts render crisply in the UI font. */
   input,
   textarea,
   button {
@@ -62,18 +82,23 @@
   }
 }
 
-/* warm ambient gradients like the original "paper" feel */
+/* Warm ambient glow so the dark caramel page never feels flat. */
 .paper {
   background-image:
     radial-gradient(
       1100px 520px at 20% -10%,
-      rgba(234, 138, 62, 0.10),
+      rgba(224, 158, 71, 0.13),
       transparent 60%
     ),
     radial-gradient(
       900px 600px at 100% 115%,
-      rgba(93, 156, 115, 0.08),
+      rgba(105, 171, 127, 0.07),
       transparent 55%
+    ),
+    radial-gradient(
+      700px 420px at 85% -5%,
+      rgba(242, 192, 105, 0.06),
+      transparent 60%
     );
 }
 
@@ -82,7 +107,7 @@
   height: 6px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: var(--color-dusk-200);
+  background: var(--color-dusk-400);
   border-radius: 999px;
 }
 .scrollbar-thin::-webkit-scrollbar-track {
@@ -113,13 +138,13 @@
 
 @keyframes ring-pulse {
   0% {
-    box-shadow: 0 0 0 0 rgba(234, 138, 62, 0.45);
+    box-shadow: 0 0 0 0 rgba(242, 192, 105, 0.5);
   }
   70% {
-    box-shadow: 0 0 0 18px rgba(234, 138, 62, 0);
+    box-shadow: 0 0 0 18px rgba(242, 192, 105, 0);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(234, 138, 62, 0);
+    box-shadow: 0 0 0 0 rgba(242, 192, 105, 0);
   }
 }
 .animate-ring {

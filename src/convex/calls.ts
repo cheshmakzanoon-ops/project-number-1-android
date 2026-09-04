@@ -1,7 +1,46 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
 import type { Id } from "./_generated/dataModel";
+
+type ParticipantRowDoc = {
+  _id: Id<"callParticipants">;
+  callId: Id<"calls">;
+  userId: Id<"users">;
+  joinedAt: number;
+  acceptedAt?: number;
+  leftAt?: number;
+};
+
+type UserDoc = {
+  _id: Id<"users">;
+  username: string;
+  displayName: string;
+  themeColor: string;
+  createdAt: number;
+  lastSeenAt: number;
+};
+
+/** A compact public view of one participant for call UIs. */
+function peerView(p: ParticipantRowDoc, u: UserDoc | null) {
+  return {
+    userId: p.userId,
+    displayName: u?.displayName ?? "…",
+    themeColor: u?.themeColor ?? "#8a6340",
+    joined: p.acceptedAt != null,
+  };
+}
+
+/** Everyone still on/invited to a call (rows are never deleted). */
+async function participantsOf(
+  ctx: { db: QueryCtx["db"] },
+  callId: Id<"calls">,
+): Promise<ParticipantRowDoc[]> {
+  return await ctx.db
+    .query("callParticipants")
+    .withIndex("by_call", (q) => q.eq("callId", callId))
+    .collect();
+}
 
 /** Start an outbound call to a conversation (rings every member but us). */
 export const start = mutation({
@@ -50,8 +89,9 @@ export const start = mutation({
       startedAt: now,
     });
     // Every ringed member becomes a participant so each device's
-    // "myCalls" query sees the ringing call and can answer it (LiveKit
-    // provides the actual media path).
+    // \"myCalls\" query sees the ringing call and can answer it (LiveKit
+    // provides the actual media path). acceptedAt stays unset until the
+    // member actually answers.
     for (const m of members) {
       await ctx.db.insert("callParticipants", {
         callId,
@@ -79,21 +119,34 @@ export const details = query({
     if (!me) return null;
     const call = await ctx.db.get(args.callId);
     if (!call) return null;
-    const participants = await ctx.db
-      .query("callParticipants")
-      .withIndex("by_call", (q) => q.eq("callId", args.callId))
-      .collect();
-    const members = [];
+    const participants = await participantsOf(ctx, args.callId);
+    const members: Array<{
+      userId: Id<"users">;
+      displayName: string;
+      themeColor: string;
+      online: boolean;
+      joined: boolean;
+    }> = [];
     for (const p of participants) {
+      if (p.leftAt) continue;
       const u = await ctx.db.get(p.userId);
-      if (u) members.push({ userId: u._id, displayName: u.displayName, themeColor: u.themeColor, online: Date.now() - u.lastSeenAt < 60_000 });
+      if (!u) continue;
+      members.push({
+        userId: u._id,
+        displayName: u.displayName,
+        themeColor: u.themeColor,
+        online: Date.now() - u.lastSeenAt < 60_000,
+        joined: p.acceptedAt != null,
+      });
     }
-    const isMine = participants.some((p) => p.userId === me);
+    const mine = participants.find((p) => p.userId === me);
+    const isMine = !!mine && !mine.leftAt;
     return {
       call,
       members,
       isMine,
       meIsInitiator: call.initiatorId === me,
+      meAccepted: mine?.acceptedAt != null || (call.initiatorId === me && call.status === "active"),
     };
   },
 });
@@ -112,6 +165,13 @@ export const myCalls = query({
 
     const now = Date.now();
 
+    type Peer = {
+      userId: Id<"users">;
+      displayName: string;
+      themeColor: string;
+      joined: boolean;
+    };
+    type Caller = { userId: Id<"users">; displayName: string; themeColor: string };
     const out: Array<{
       callId: Id<"calls">;
       conversationId: Id<"conversations">;
@@ -119,12 +179,14 @@ export const myCalls = query({
       status: "ringing" | "active" | "ended" | "declined" | "missed";
       initiatorId: Id<"users">;
       startedAt: number;
-      otherName: string;
-      otherColor: string;
       initiatedByMe: boolean;
+      acceptedByMe: boolean;
+      caller: Caller | null;
+      peers: Peer[];
     }> = [];
 
     for (const p of parts) {
+      if (p.leftAt) continue;
       const call = await ctx.db.get(p.callId);
       if (!call) continue;
       if (call.status !== "ringing" && call.status !== "active") continue;
@@ -134,21 +196,27 @@ export const myCalls = query({
       // reopened later could briefly re-present a ring that is already over.
       if (call.status === "ringing" && now - call.startedAt > 75_000) continue;
 
-      // find a member who isn't me
-      const otherParts = await ctx.db
-        .query("callParticipants")
-        .withIndex("by_call", (q) => q.eq("callId", call._id))
-        .collect();
-      const otherId = otherParts.find((o) => o.userId !== me)?.userId;
-      let otherName = "…";
-      let otherColor = "#8a6340";
-      if (otherId) {
-        const u = await ctx.db.get(otherId);
-        if (u) {
-          otherName = u.displayName;
-          otherColor = u.themeColor;
-        }
+      const myRow = p;
+      const acceptedByMe = myRow.acceptedAt != null;
+      // Pull the real per-call rows for everyone else.
+      const allRows = await participantsOf(ctx, call._id);
+      const initiatorUser = await ctx.db.get(call.initiatorId);
+
+      const peers: Peer[] = [];
+      for (const r of allRows) {
+        if (r.userId === me || r.leftAt) continue;
+        const u = await ctx.db.get(r.userId);
+        if (u) peers.push(peerView(r, u));
       }
+
+      const caller: Caller | null = initiatorUser
+        ? {
+            userId: initiatorUser._id,
+            displayName: initiatorUser.displayName,
+            themeColor: initiatorUser.themeColor,
+          }
+        : null;
+
       out.push({
         callId: call._id,
         conversationId: call.conversationId,
@@ -156,9 +224,10 @@ export const myCalls = query({
         status: call.status,
         initiatorId: call.initiatorId,
         startedAt: call.startedAt,
-        otherName,
-        otherColor,
         initiatedByMe: call.initiatorId === me,
+        acceptedByMe: acceptedByMe || (call.initiatorId === me && call.status === "active"),
+        caller,
+        peers,
       });
     }
     // Newest first: the client reconciles from index 0, and a stale row from
@@ -168,7 +237,41 @@ export const myCalls = query({
   },
 });
 
-/** Set the call active (callee answering / caller confirming). */
+/** Send a hangup signal to every still-present member except `exceptMe`. */
+async function notifyHangup(
+  ctx: { db: MutationCtx["db"] },
+  callId: Id<"calls">,
+  exceptMe: Id<"users">,
+) {
+  const rows = await participantsOf(ctx, callId);
+  const now = Date.now();
+  for (const r of rows) {
+    if (r.userId === exceptMe || r.leftAt) continue;
+    await ctx.db.insert("callSignals", {
+      callId,
+      fromUserId: exceptMe,
+      toUserId: r.userId,
+      type: "hangup",
+      createdAt: now,
+    });
+  }
+}
+
+/** Mark everyone still present as left (end of the whole call). */
+async function retireCall(
+  ctx: { db: MutationCtx["db"] },
+  callId: Id<"calls">,
+  status: "ended" | "declined" | "missed",
+) {
+  const now = Date.now();
+  const rows = await participantsOf(ctx, callId);
+  for (const r of rows) {
+    if (!r.leftAt) await ctx.db.patch(r._id, { leftAt: now });
+  }
+  await ctx.db.patch(callId, { status, endedAt: now });
+}
+
+/** A member answers: they join the media room (and open it for everyone). */
 export const answer = mutation({
   args: { callId: v.id("calls"), token: v.string() },
   handler: async (ctx, args) => {
@@ -176,15 +279,46 @@ export const answer = mutation({
     if (!me) return;
     const call = await ctx.db.get(args.callId);
     if (!call) return;
-    // Only a still-ringing call may be answered. Without this guard a late
-    // accept after the caller hung up would resurrect the call into a room
-    // with nobody in it.
-    if (call.status !== "ringing") return;
-    await ctx.db.patch(args.callId, { status: "active" });
+    if (call.status !== "ringing" && call.status !== "active") return;
+    const myRow = await ctx.db
+      .query("callParticipants")
+      .withIndex("by_call_user", (q) => q.eq("callId", args.callId).eq("userId", me))
+      .first();
+    if (!myRow || myRow.leftAt || myRow.acceptedAt) return;
+    const now = Date.now();
+    await ctx.db.patch(myRow._id, { acceptedAt: now });
+    if (call.status === "ringing") {
+      // First answer opens the call for everyone; the initiator is already in
+      // the media room, so count them as joined too.
+      const initRow = await ctx.db
+        .query("callParticipants")
+        .withIndex("by_call_user", (q) =>
+          q.eq("callId", args.callId).eq("userId", call.initiatorId),
+        )
+        .first();
+      if (initRow && !initRow.acceptedAt) {
+        await ctx.db.patch(initRow._id, { acceptedAt: now });
+      }
+      await ctx.db.patch(args.callId, { status: "active" });
+    }
   },
 });
 
-/** End, decline, or mark missed. */
+/**
+ * End, decline, miss, or LEAVE a call.
+ *
+ * A call is a little conference room now: every member of the conversation
+ * gets rung, and each may answer independently (group calls). So ending is
+ * per-participant whenever possible, and only retires the whole call when
+ * nobody is left in it:
+ *  - the CALLER cancelling while nobody has answered → whole call over.
+ *  - the last ringing callee declining an unanswered call → whole call over.
+ *  - a participant leaving an ACTIVE call that still has someone joined and
+ *    someone still able to join → only they leave.
+ *  - a participant leaving an ACTIVE call that would be left empty (or down
+ *    to one joined person with nobody still able to join) → whole call over.
+ * 1:1 calls behave exactly like before (either side leaving ends it).
+ */
 export const end = mutation({
   args: {
     callId: v.id("calls"),
@@ -200,29 +334,47 @@ export const end = mutation({
     if (!call) return;
     if (call.status === "ended") return;
     const wanted = args.status ?? "ended";
-    // A call that has been ANSWERED may only be terminated by an explicit
-    // "ended". Stale "missed"/"declined" signals — a ring timeout that fired
-    // on a second device, a busy-decline that raced an accept, an app that
-    // was reopened after the call connected — must never kill a live call.
-    if (call.status === "active" && wanted !== "ended") return;
-    await ctx.db.patch(args.callId, {
-      status: wanted,
-      endedAt: Date.now(),
-    });
-    const parts = await ctx.db
-      .query("callParticipants")
-      .withIndex("by_call", (q) => q.eq("callId", args.callId))
-      .collect();
-    for (const part of parts) {
-      await ctx.db.patch(part._id, { leftAt: Date.now() });
-      if (part.userId === me) continue;
-      await ctx.db.insert("callSignals", {
-        callId: args.callId,
-        fromUserId: me,
-        toUserId: part.userId,
-        type: "hangup",
-        createdAt: Date.now(),
-      });
+    const rows = await participantsOf(ctx, args.callId);
+    const myRow = rows.find((r) => r.userId === me);
+    if (!myRow || myRow.leftAt) return;
+    const now = Date.now();
+
+    const ringing = call.status === "ringing";
+
+    // Caller cancels / ring times out while nobody answered: whole call over
+    // with the requested status (keeps "missed"/"declined" honest).
+    if (ringing && call.initiatorId === me) {
+      await retireCall(ctx, args.callId, wanted);
+      await notifyHangup(ctx, args.callId, me);
+      return;
+    }
+
+    // Everyone else: leave the call (decline / hang up / ring timeout).
+    await ctx.db.patch(myRow._id, { leftAt: now });
+
+    if (ringing) {
+      // A still-unanswered call: if only the caller remains, it is over for
+      // everyone; otherwise the ring simply continues for the rest.
+      const stillHere = rows.filter((r) => r.userId !== me && !r.leftAt);
+      if (stillHere.length <= 1) {
+        await retireCall(ctx, args.callId, wanted);
+        await notifyHangup(ctx, args.callId, me);
+      }
+      return;
+    }
+
+    // Active call. Let the media room decide: it dies when nobody is joined
+    // anymore, or when it would be down to a single joined person with no one
+    // left who can still answer.
+    const joinedOthers = rows.filter(
+      (r) => r.userId !== me && !r.leftAt && r.acceptedAt,
+    );
+    const ringingOthers = rows.filter(
+      (r) => r.userId !== me && !r.leftAt && !r.acceptedAt,
+    );
+    if (joinedOthers.length === 0 || (joinedOthers.length === 1 && ringingOthers.length === 0)) {
+      await retireCall(ctx, args.callId, "ended");
+      await notifyHangup(ctx, args.callId, me);
     }
   },
 });
@@ -301,17 +453,7 @@ export const sendSignal = mutation({
 /**
  * Housekeeping for calls nobody is around to end. There is no scheduler in
  * this app, so it piggybacks on the presence heartbeat that every open client
- * already sends every ~20s (see users.heartbeat) — mutations can run other
- * mutations, queries cannot, and a heartbeat is the one cheap cadence we have.
- *
- *  - ringing calls unanswered for > 75s → missed. The clients' own ring
- *    timers end at 45s (callee) / 60s (caller); this is the safety net for
- *    when every screen died mid-ring, so a row can never ring forever or
- *    resurrect as a ghost ring on a later app open.
- *  - active calls where EVERY participant's presence went stale (> 10 min) →
- *    ended. Both phones were abandoned/died mid-call (the LiveKit room is
- *    empty by then), so the row should not keep "active" forever and block
- *    those users from ever starting a new call.
+ * already sends every ~20s (see users.heartbeat).
  */
 export const cleanupStale = mutation({
   args: { token: v.string() },
@@ -326,7 +468,7 @@ export const cleanupStale = mutation({
       .take(20);
     for (const call of staleRings) {
       if (now - call.startedAt > 75_000) {
-        await ctx.db.patch(call._id, { status: "missed", endedAt: now });
+        await retireCall(ctx, call._id, "missed");
       }
     }
 
@@ -337,20 +479,18 @@ export const cleanupStale = mutation({
     for (const call of active) {
       // Fast path: a recent call can't have stale participants yet.
       if (now - call.startedAt < 10 * 60_000) continue;
-      const parts = await ctx.db
-        .query("callParticipants")
-        .withIndex("by_call", (q) => q.eq("callId", call._id))
-        .collect();
-      let everyoneGone = parts.length > 0;
-      for (const p of parts) {
-        const u = await ctx.db.get(p.userId);
+      const rows = await participantsOf(ctx, call._id);
+      const present = rows.filter((r) => !r.leftAt);
+      let everyoneGone = present.length > 0;
+      for (const r of present) {
+        const u = await ctx.db.get(r.userId);
         if (!u || now - u.lastSeenAt < 10 * 60_000) {
           everyoneGone = false;
           break;
         }
       }
       if (everyoneGone) {
-        await ctx.db.patch(call._id, { status: "ended", endedAt: now });
+        await retireCall(ctx, call._id, "ended");
       }
     }
   },

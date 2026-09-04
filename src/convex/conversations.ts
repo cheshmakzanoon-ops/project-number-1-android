@@ -85,11 +85,18 @@ export const myConversations = query({
           if (!msg.deletedAt && msg.senderId !== me) unread += 1;
         }
 
-        // dm display name
+        // dm display name / group title (members except me, so every person
+        // in the group sees the others' names — no custom names in this app)
         let name = conv.name;
         if (conv.kind === "dm") {
           const other = members.find((mm) => mm.user._id !== me);
           name = other?.user.displayName ?? "گفتگو";
+        } else if (!name) {
+          const others = members.filter((mm) => mm.user._id !== me);
+          name =
+            others.length > 0
+              ? others.map((mm) => mm.user.displayName).join("， ")
+              : "گروه";
         }
 
         return {
@@ -117,14 +124,105 @@ export const conversation = query({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return null;
+    const conv = await ctx.db.get(args.conversationId);
+    if (!conv) return null;
+    const memberRows = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .collect();
+    const mine = memberRows.find((r) => r.userId === me);
+    if (!mine) {
+      return { id: args.conversationId, canAccess: false };
+    }
+    const members: Array<{
+      userId: Id<"users">;
+      displayName: string;
+      themeColor: string;
+      online: boolean;
+    }> = [];
+    const now = Date.now();
+    for (const r of memberRows) {
+      const u = await ctx.db.get(r.userId);
+      if (u) {
+        members.push({
+          userId: u._id,
+          displayName: u.displayName,
+          themeColor: u.themeColor,
+          online: now - u.lastSeenAt < 60_000,
+        });
+      }
+    }
+    let name = conv.name;
+    if (conv.kind === "dm") {
+      name = members.find((m) => m.userId !== me)?.displayName ?? "گفتگو";
+    } else if (!name) {
+      const others = members.filter((m) => m.userId !== me);
+      name = others.length > 0 ? others.map((m) => m.displayName).join("， ") : "گروه";
+    }
     return {
       id: args.conversationId,
-      canAccess: !!(await ctx.db
-        .query("conversationMembers")
-        .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
-        .filter((q) => q.eq(q.field("userId"), me))
-        .first()),
+      canAccess: true,
+      kind: conv.kind,
+      name,
+      createdAt: conv.createdAt,
+      members,
     };
+  },
+});
+
+/**
+ * Create a group conversation with the given members (or return an existing
+ * group with the exact same membership, so taps never pile up duplicate
+ * groups). Groups power family-wide chats and 3+-person calls.
+ */
+export const startGroup = mutation({
+  args: { memberIds: v.array(v.id("users")), token: v.string() },
+  handler: async (ctx, args) => {
+    const me = await userIdFromToken(ctx, args.token);
+    if (!me) throw new Error("unauthorized");
+    const ids = [...new Set(args.memberIds)];
+    if (ids.length < 2) throw new Error("need_two_others");
+    if (ids.length > 7) throw new Error("too_many");
+    if (ids.includes(me)) throw new Error("self");
+    const memberSet = new Set([me, ...ids]);
+
+    // All invitees must actually exist (never phantom members).
+    for (const id of ids) {
+      if (!(await ctx.db.get(id))) throw new Error("no_such_user");
+    }
+
+    // Dedupe: if a group with exactly this membership already exists, reuse it.
+    const mine = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_user", (q) => q.eq("userId", me))
+      .collect();
+    for (const m of mine) {
+      const conv = await ctx.db.get(m.conversationId);
+      if (!conv || conv.kind !== "group" || conv.name) continue;
+      const rows = await ctx.db
+        .query("conversationMembers")
+        .withIndex("by_conversation", (q) => q.eq("conversationId", conv._id))
+        .collect();
+      if (rows.length !== memberSet.size) continue;
+      if (rows.every((r) => memberSet.has(r.userId))) return conv._id;
+    }
+
+    const now = Date.now();
+    const convId = await ctx.db.insert("conversations", {
+      kind: "group",
+      createdBy: me,
+      createdAt: now,
+      lastMessageAt: now,
+    });
+    for (const uid of memberSet) {
+      await ctx.db.insert("conversationMembers", {
+        conversationId: convId,
+        userId: uid,
+        joinedAt: now,
+        lastReadAt: now,
+      });
+    }
+    return convId;
   },
 });
 

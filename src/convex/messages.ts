@@ -25,14 +25,17 @@ export const list = query({
       .order("desc")
       .take(args.limit ?? 100);
 
-    // The peer's read cursor: a message I sent counts as "read" once the
-    // other participant's lastReadAt has passed its createdAt (WhatsApp ticks).
+    // The peer's read cursor: in a 1:1 chat a message I sent counts as
+    // "read" once the other participant's lastReadAt has passed its
+    // createdAt (WhatsApp ticks). In group chats there is no single "other"
+    // cursor, so messages never claim a false double tick.
     const members = await ctx.db
       .query("conversationMembers")
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
       .collect();
-    const other = members.find((m) => m.userId !== me);
+    const other = members.length === 2 ? members.find((m) => m.userId !== me) : undefined;
     const otherReadAt = other?.lastReadAt ?? 0;
+    const isDM = members.length === 2;
 
     const out: Array<{
       _id: Id<"messages">;
@@ -77,7 +80,7 @@ export const list = query({
         editedAt: m.editedAt,
         deletedAt: m.deletedAt,
         isMine: m.senderId === me,
-        read: m.senderId === me && !m.deletedAt && m.createdAt <= otherReadAt,
+        read: isDM && m.senderId === me && !m.deletedAt && m.createdAt <= otherReadAt,
         reactions: counts,
         usersReacted,
         clientMessageId: m.clientMessageId,

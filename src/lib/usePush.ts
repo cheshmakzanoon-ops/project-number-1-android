@@ -32,8 +32,8 @@ export function usePush(token: string | null): {
   const [subscribing, setSubscribing] = useState(false);
 
   const subscribeNow = useCallback(async () => {
-    // The service worker that receives pushes is only registered in the
-    // production build; subscribing elsewhere would hang forever.
+    // Web Push needs the service worker + a real VAPID endpoint, which only
+    // exist in the deployed app; skip in the dev preview to avoid a hang.
     if (!import.meta.env.PROD) return;
     if (!token || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
     try {
@@ -64,6 +64,21 @@ export function usePush(token: string | null): {
   useEffect(() => {
     if (notifPerm === "granted") void subscribeNow();
   }, [notifPerm, subscribeNow]);
+
+  // Browsers occasionally rotate push subscriptions server-side
+  // (pushsubscriptionchange) — if we don't re-subscribe, the old endpoint
+  // dies and the device silently stops ringing even though permission is
+  // still granted. Re-create the subscription whenever that happens.
+  useEffect(() => {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+    const onSubChange = () => {
+      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+        void subscribeNow();
+      }
+    };
+    navigator.serviceWorker.addEventListener("pushsubscriptionchange", onSubChange);
+    return () => navigator.serviceWorker.removeEventListener("pushsubscriptionchange", onSubChange);
+  }, [subscribeNow]);
 
   const enable = useCallback(async () => {
     if (typeof Notification === "undefined") return;

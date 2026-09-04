@@ -10,11 +10,12 @@ import {
   MonitorUp,
   Phone,
   PhoneOff,
+  Users,
   Volume2,
 } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { fa } from "../lib/format";
-import type { CallSession, GarmaCallkit } from "../lib/useCallkit";
+import type { CallSession, GarmaCallkit, RemotePeer } from "../lib/useCallkit";
 
 function useElapsed(phase: CallSession["phase"]) {
   const [t, setT] = useState(0);
@@ -51,8 +52,9 @@ export function CallOverlay({
   const session = kit.session!;
   const { phase, kind } = session;
   const elapsed = useElapsed(phase);
-  const incoming = phase === "incoming";
   const active = phase === "active";
+  const incoming = phase === "incoming";
+  const showVideo = kind === "video";
   const containerRef = useRef<HTMLDivElement>(null);
   const [fs, setFs] = useState(false);
   const busy = kit.busy;
@@ -63,7 +65,23 @@ export function CallOverlay({
     return () => document.removeEventListener("fullscreenchange", onFullscreen);
   }, []);
 
-  const showVideo = kind === "video";
+  const joinedPeers = session.peers.filter((p) => p.joined);
+  const firstPeer = session.peers[0];
+  // Who this screen is "about": the caller for an incoming ring, the person
+  // being called for an outgoing one, and the single other person (or a
+  // generic label) mid-call.
+  const titleName = incoming
+    ? session.callerName
+    : joinedPeers.length === 1
+      ? joinedPeers[0].displayName
+      : firstPeer?.displayName ?? "…";
+  const titleColor = incoming
+    ? session.callerColor
+    : joinedPeers.length === 1
+      ? joinedPeers[0].themeColor
+      : firstPeer?.themeColor ?? "#8a6340";
+  const isGroup = session.peers.length > 1;
+  const groupCount = session.peers.length + 1; // includes me
 
   // Keep the screen awake during a call (Zoom-style "always on") where the
   // browser supports the Screen Wake Lock API. No-op on iOS Safari.
@@ -91,6 +109,21 @@ export function CallOverlay({
     };
   }, []);
 
+  // Auto-dismiss the screen-share error toast after a few seconds.
+  const [showShareErr, setShowShareErr] = useState(false);
+  useEffect(() => {
+    if (!kit.shareError) {
+      setShowShareErr(false);
+      return;
+    }
+    setShowShareErr(true);
+    const t = window.setTimeout(() => {
+      setShowShareErr(false);
+      kit.clearShareError();
+    }, 5000);
+    return () => window.clearTimeout(t);
+  }, [kit.shareError, kit]);
+
   const toggleFullscreen = () => {
     const el = containerRef.current;
     if (!el) return;
@@ -105,7 +138,7 @@ export function CallOverlay({
   return (
     <div
       ref={containerRef}
-      className={`safe-area fixed inset-0 z-50 flex flex-col overflow-hidden bg-dusk-950 text-white ${
+      className={`safe-area fixed inset-0 z-50 flex flex-col overflow-hidden bg-[#120a05] text-white ${
         hidden ? "invisible pointer-events-none" : ""
       }`}
     >
@@ -118,10 +151,10 @@ export function CallOverlay({
         }}
       />
 
-      {/* NOTE: remote mic audio plays through exactly ONE element (the audio
-          element useCallkit attaches on TrackSubscribed). The video tiles
-          below are muted on purpose — playing the mic track through them too
-          caused doubled, phasey audio on every call. */}
+      {/* NOTE: remote audio plays through exactly ONE element per person (the
+          audio elements useCallkit attaches on TrackSubscribed). The video
+          tiles below are muted on purpose — playing the mic track through
+          them too caused doubled, phasey audio on every call. */}
       {kit.reconnecting && active && (
         <div className="absolute inset-x-0 top-14 z-30 flex justify-center">
           <span className="animate-pulse rounded-full border border-amber-300/30 bg-amber-500/20 px-4 py-1.5 text-xs font-bold text-amber-200 backdrop-blur">
@@ -130,44 +163,76 @@ export function CallOverlay({
         </div>
       )}
 
-      {/* LiveKit measured the OTHER side's link to us as poor — their picture
-          will be blurry/low-fps. Name the cause instead of leaving the caller
-          to blame their own phone. Only shown while their video is actually
-          flowing (camera on / screen shared). */}
-      {kit.remotePoor &&
-        active &&
-        showVideo &&
-        !kit.reconnecting &&
-        (kit.remoteCamOn || Boolean(kit.screenRemote)) && (
-        <div className="absolute inset-x-0 top-24 z-30 flex justify-center px-4">
-          <span className="rounded-full border border-amber-300/30 bg-amber-500/15 px-4 py-1.5 text-center text-xs font-bold text-amber-200/90 backdrop-blur">
-            اینترنت {session.otherName} ضعیف است — تصویر او با کیفیت پایین می‌آید
+      {/* share failure toast */}
+      {showShareErr && kit.shareError && (
+        <div className="absolute inset-x-0 top-20 z-40 flex justify-center px-4">
+          <span className="animate-rise flex items-center gap-2 rounded-full border border-rose-400/30 bg-rose-500/25 px-4 py-2 text-xs font-bold text-rose-100 backdrop-blur">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-rose-500 text-[10px] font-black text-white">
+              !
+            </span>
+            {kit.shareError}
           </span>
         </div>
       )}
 
-      {/* -------- INCOMING / OUTGOING (pre-connect) -------- */}
+      {/* -------- INCOMING / OUTGOING / JOIN OFFER (pre-connect) -------- */}
       {!active && (
         <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-6">
           <p className="mb-6 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-xs font-semibold tracking-wide text-white/70 backdrop-blur">
-            {incoming
-              ? kind === "video"
-                ? "تماس تصویری ورودی"
-                : "تماس صوتی ورودی"
-              : "تماس با گرما"}
+            {incoming && session.joinOffer
+              ? "در جریان است"
+              : incoming
+                ? kind === "video"
+                  ? "تماس تصویری ورودی"
+                  : "تماس صوتی ورودی"
+                : isGroup
+                  ? kind === "video"
+                    ? "تماس گروهی تصویری"
+                    : "تماس گروهی صوتی"
+                  : "تماس با گرما"}
           </p>
           <div className={incoming ? "animate-ring rounded-[48px]" : ""}>
             <div className="rounded-[48px] bg-gradient-to-br from-ember-400/30 to-sage-400/20 p-2">
-              <Avatar name={session.otherName} color={session.otherColor} size={136} />
+              {isGroup && !incoming ? (
+                <div className="grid h-[136px] w-[136px] place-items-center rounded-[48px] bg-gradient-to-br from-[#3a250f] to-[#241408] ring-1 ring-ember-300/25">
+                  <Users size={56} className="text-ember-300" />
+                </div>
+              ) : (
+                <Avatar name={titleName} color={titleColor} size={136} />
+              )}
             </div>
           </div>
-          <h2 className="mt-7 text-3xl font-black drop-shadow-sm">{session.otherName}</h2>
-          <p className="mt-3 text-lg text-white/70">
-            {incoming
-              ? kind === "video"
-                ? "می‌خواهد با تو گفتگو کند"
-                : "می‌خواهد با تو حرف بزند"
-              : "در حال زنگ زدن…"}
+          <h2 className="mt-7 text-center text-3xl font-black drop-shadow-sm">
+            {incoming || !isGroup ? titleName : `${groupCount} نفر`}
+          </h2>
+          {isGroup && !incoming && (
+            <p className="mt-1 max-w-[19rem] truncate text-sm text-white/55">
+              {session.peers.map((p) => p.displayName).join("، ")}
+            </p>
+          )}
+          <p className="mt-3 text-center text-lg text-white/70">
+            {incoming ? (
+              session.joinOffer ? (
+                joinedPeers.length > 0 ? (
+                  <>
+                    <span className="font-bold text-sage-300">{joinedPeers.map((p) => p.displayName).join(" و ")}</span>{" "}
+                    در تماس‌اند — تو هم بپیوند
+                  </>
+                ) : (
+                  "به این تماس بپیوند"
+                )
+              ) : isGroup ? (
+                <>
+                  <span className="font-bold text-sage-300">{session.callerName}</span> تماس {kind === "video" ? "گروهی تصویری" : "گروهی صوتی"} گرفته
+                </>
+              ) : kind === "video" ? (
+                <>می‌خواهد با تو گفتگو کند</>
+              ) : (
+                <>می‌خواهد با تو حرف بزند</>
+              )
+            ) : (
+              "در حال زنگ زدن…"
+            )}
           </p>
           <p className="mt-1 text-sm tabular-nums text-white/40">{FORMAT_TIME(elapsed)}</p>
 
@@ -177,7 +242,12 @@ export function CallOverlay({
                 <ColAction label="رد کردن" tone="rose" onClick={kit.decline} disabled={busy}>
                   <PhoneOff size={26} style={{ transform: "scaleX(-1)" }} />
                 </ColAction>
-                <ColAction label={busy ? "در حال اتصال…" : "پاسخ"} tone="sage" onClick={kit.accept} disabled={busy}>
+                <ColAction
+                  label={busy ? "در حال اتصال…" : session.joinOffer ? "پیوستن" : "پاسخ"}
+                  tone="sage"
+                  onClick={kit.accept}
+                  disabled={busy}
+                >
                   <Phone size={28} style={{ transform: "scaleX(-1)" }} />
                 </ColAction>
               </>
@@ -192,97 +262,14 @@ export function CallOverlay({
 
       {/* -------- ACTIVE VIDEO -------- */}
       {active && showVideo && (
-        <div className="relative z-10 flex min-h-0 flex-1 flex-col">
-          {/* main region */}
-          <div className="relative flex-1 overflow-hidden bg-dusk-950">
-            {kit.screenRemote ? (
-              <>
-                <MediaFeed
-                  stream={kit.screenRemote}
-                  kind="video"
-                  muted
-                  className="absolute inset-0 h-full w-full bg-dusk-900 object-contain"
-                />
-                <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm">
-                  <span className="flex items-center gap-2 rounded-full bg-dusk-950/70 px-4 py-2 backdrop-blur">
-                    <MonitorUp size={17} /> اشتراک صفحه
-                  </span>
-                </div>
-              </>
-            ) : kit.remote && kit.remoteCamOn ? (
-              <MediaFeed
-                stream={kit.remote}
-                kind="video"
-                muted
-                className="absolute inset-0 h-full w-full bg-dusk-900 object-cover"
-              />
-            ) : (
-              <div className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(circle_at_50%_30%,#2e2118,#0f0a06)]">
-                <div className="rounded-[40px] bg-gradient-to-br from-ember-400/30 to-sage-400/15 p-2">
-                  {!kit.remoteCamOn ? (
-                    <div className="grid h-28 w-28 place-items-center rounded-[40px] bg-dusk-800/70">
-                      <CameraOff size={44} className="text-white/40" />
-                    </div>
-                  ) : (
-                    <Avatar name={session.otherName} color={session.otherColor} size={116} />
-                  )}
-                </div>
-                <p className="mt-4 text-sm text-white/55">
-                  {!kit.remoteCamOn ? `دوربین ${session.otherName} خاموش است` : "در حال اتصال تصویر…"}
-                </p>
-              </div>
-            )}
-
-            {/* remote badges */}
-            {active && (
-              <div className="absolute inset-x-4 top-4 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 rounded-full border border-white/10 bg-dusk-950/55 px-3 py-1.5 text-xs backdrop-blur">
-                  <span className="relative flex h-2 w-2">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sage-400 opacity-75" />
-                    <span className="relative inline-flex h-2 w-2 rounded-full bg-sage-400" />
-                  </span>
-                  <span className="font-bold">{session.otherName}</span>
-                  <span className="tabular-nums opacity-70">{FORMAT_TIME(elapsed)}</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  {kit.camQuality && kit.camOn && (
-                    <button
-                      type="button"
-                      onClick={kit.cycleQuality}
-                      title="کیفیت تصویر دوربین تو — برای تغییر ضربه بزن (خودکار، ۴۸۰، ۷۲۰، ۱۰۸۰)"
-                      aria-label="تغییر کیفیت دوربین"
-                      className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 bg-dusk-950/60 px-2.5 py-1 text-[11px] font-bold tracking-wide text-sage-300 backdrop-blur transition hover:border-sage-400/40 hover:text-sage-200 active:scale-95"
-                    >
-                      <span className="h-1.5 w-1.5 rounded-full bg-sage-400" />
-                      {fa(kit.camQuality)}
-                    </button>
-                  )}
-                  {!kit.remoteMicOn && <Badge icon={<MicOff size={13} />} />}
-                  {!kit.remoteCamOn && <Badge icon={<CameraOff size={13} />} />}
-                </div>
-              </div>
-            )}
-
-            {/* local preview corner */}
-            {kit.camOn && kit.local && (
-              <div className="absolute bottom-5 left-4 z-10 overflow-hidden rounded-2xl border border-white/15 bg-dusk-900 shadow-2xl">
-                <MediaFeed
-                  stream={kit.local}
-                  kind="video"
-                  muted
-                  className="h-40 w-28 object-cover"
-                  style={{ transform: "scaleX(-1)" }}
-                />
-                <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full bg-dusk-950/70 px-2 py-0.5 text-[10px] font-semibold text-white/80 backdrop-blur">
-                  من
-                </span>
-              </div>
-            )}
-          </div>
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col">            {/* main region */}
+            <div className="relative flex-1 overflow-hidden bg-[#120a05]">
+              <VideoStage kit={kit} session={session} elapsed={elapsed} />
+            </div>
 
           {/* control center */}
           <div className="relative z-20 px-4 pb-6 pt-2">
-            <div className="mx-auto flex w-fit max-w-full items-center gap-1.5 overflow-x-auto rounded-[2.2rem] border border-white/10 bg-dusk-950/55 px-3 py-2.5 shadow-2xl backdrop-blur-xl">
+            <div className="mx-auto flex w-fit max-w-full items-center gap-1.5 overflow-x-auto rounded-[2.2rem] border border-white/10 bg-[#140b05]/60 px-3 py-2.5 shadow-2xl backdrop-blur-xl">
               <CtrlBtn on={kit.micOn} onClick={kit.toggleMic} label={kit.micOn ? "سکوت" : "صدا"}>
                 {kit.micOn ? <Mic size={22} /> : <MicOff size={22} />}
               </CtrlBtn>
@@ -292,7 +279,12 @@ export function CallOverlay({
               <CtrlBtn label="تعویض دوربین" onClick={kit.switchCamera}>
                 <FlipHorizontal size={22} />
               </CtrlBtn>
-              <CtrlBtn on={kit.sharing} onClick={kit.toggleShare} label="اشتراک صفحه">
+              <CtrlBtn
+                on={kit.sharing}
+                spin={kit.shareStarting}
+                label={kit.sharing ? "پایان اشتراک" : "اشتراک صفحه"}
+                onClick={kit.toggleShare}
+              >
                 <MonitorUp size={22} />
               </CtrlBtn>
               <CtrlBtn label="تمام‌صفحه" onClick={toggleFullscreen}>
@@ -301,11 +293,6 @@ export function CallOverlay({
               <CtrlBtn label="صفحه اصلی" onClick={onMinimize}>
                 <Minimize2 size={22} />
               </CtrlBtn>
-              {kit.sharing && (
-                <span className="absolute right-3 top-2 rounded-full bg-sage-500 px-3 py-1 text-xs font-bold">
-                  در حال اشتراک…
-                </span>
-              )}
               <button
                 onClick={kit.hangup}
                 aria-label="پایان تماس"
@@ -320,25 +307,69 @@ export function CallOverlay({
 
       {/* -------- ACTIVE AUDIO ONLY -------- */}
       {active && !showVideo && (
-        <div className="relative z-10 flex flex-1 flex-col items-center justify-between py-10">
-          <div className="mt-8 flex flex-col items-center">
-            <div className="animate-ring rounded-[48px]">
-              <div className="rounded-[48px] bg-gradient-to-br from-ember-400/30 to-sage-400/20 p-2">
-                <Avatar name={session.otherName} color={session.otherColor} size={132} />
-              </div>
-            </div>
-            <h2 className="mt-6 text-3xl font-black drop-shadow-sm">{session.otherName}</h2>
-            <div className="mt-2 flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/70 backdrop-blur">
+        <div className="relative z-10 flex flex-1 flex-col items-center justify-between py-8">
+          <div className="mt-6 flex flex-col items-center px-6">
+            {joinedPeers.length <= 1 ? (
+              <>
+                <div className="animate-ring rounded-[48px]">
+                  <div className="rounded-[48px] bg-gradient-to-br from-ember-400/30 to-sage-400/20 p-2">
+                    <Avatar
+                      name={joinedPeers[0]?.displayName ?? firstPeer?.displayName ?? session.callerName}
+                      color={joinedPeers[0]?.themeColor ?? firstPeer?.themeColor ?? session.callerColor}
+                      size={132}
+                    />
+                  </div>
+                </div>
+                <h2 className="mt-6 text-3xl font-black drop-shadow-sm">
+                  {joinedPeers[0]?.displayName ?? session.callerName}
+                </h2>
+              </>
+            ) : (
+              <>
+                <div className="rounded-[32px] bg-gradient-to-br from-ember-400/25 to-sage-400/15 p-2 ring-1 ring-ember-300/20">
+                  <Users size={44} className="text-ember-300" />
+                </div>
+                <h2 className="mt-5 text-3xl font-black drop-shadow-sm">{fa(groupCount)} نفر در تماس گروهی</h2>
+              </>
+            )}
+            <div className="mt-3 flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-white/70 backdrop-blur">
               <span className="h-2 w-2 animate-pulse rounded-full bg-sage-400" />
               {FORMAT_TIME(elapsed)}
             </div>
-            {!kit.remoteMicOn && (
-              <p className="mt-1 text-sm text-white/45">میکروفن فرد مقابل قطع است</p>
-            )}
+
+            {/* participant list */}
+            <div className="mt-6 flex w-full max-w-sm flex-col items-center gap-2">
+              {session.peers
+                .filter((p) => p.joined)
+                .map((peer) => {
+                  const live = kit.remotes.find((r) => r.userId === peer.userId);
+                  const muted = live ? !live.micOn : false;
+                  return (
+                    <div
+                      key={peer.userId}
+                      className="flex w-full max-w-xs items-center gap-3 rounded-2xl border border-white/8 bg-white/5 px-3 py-2 backdrop-blur"
+                    >
+                      <Avatar name={peer.displayName} color={peer.themeColor} size={38} />
+                      <span className="min-w-0 flex-1 truncate text-sm font-bold">{peer.displayName}</span>
+                      <span className="flex items-center gap-1 text-[11px] text-white/55">
+                        {muted ? (
+                          <>
+                            <MicOff size={13} className="text-rose-300" /> بی‌صدا
+                          </>
+                        ) : (
+                          <>
+                            <span className="h-1.5 w-1.5 rounded-full bg-sage-400" /> در تماس
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+            </div>
           </div>
 
-          <div className="flex items-end gap-4">
-            <div className="flex items-center gap-2 rounded-[2rem] border border-white/10 bg-dusk-950/55 px-4 py-3 shadow-2xl backdrop-blur-xl">
+          <div className="flex items-end gap-4 px-4">
+            <div className="flex items-center gap-2 rounded-[2rem] border border-white/10 bg-[#140b05]/60 px-4 py-3 shadow-2xl backdrop-blur-xl">
               <CtrlBtn on={kit.micOn} onClick={kit.toggleMic} label={kit.micOn ? "سکوت" : "صدا"}>
                 {kit.micOn ? <Mic size={22} /> : <MicOff size={22} />}
               </CtrlBtn>
@@ -363,6 +394,256 @@ export function CallOverlay({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The central video area: spotlight for one stream, a grid for many. */
+function VideoStage({
+  kit,
+  session,
+  elapsed,
+}: {
+  kit: GarmaCallkit;
+  session: CallSession;
+  elapsed: number;
+}) {
+  const joinedPeers = session.peers.filter((p) => p.joined);
+  const videoSources = joinedPeers.filter((peer) => {
+    const live = kit.remotes.find((r) => r.userId === peer.userId);
+    return Boolean(live && (live.cam || live.screen));
+  });
+  const gridMode = videoSources.length > 1 || joinedPeers.length > 2;
+
+  if (!gridMode && videoSources.length === 1 && joinedPeers.length <= 2) {
+    // Spotlight: one remote person, camera or screen share fills the screen.
+    const target = videoSources[0];
+    const live = kit.remotes.find((r) => r.userId === target.userId);
+    return (
+      <SpotlightFeed
+        kit={kit}
+        live={live}
+        name={target.displayName}
+        color={target.themeColor}
+        localPreview={!kit.sharing}
+      />
+    );
+  }
+
+  if (joinedPeers.length === 0) {
+    // Everyone left / waiting for the first person to come online.
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(circle_at_50%_30%,#2e2118,#0f0a06)]">
+        <Avatar
+          name={session.peers[0]?.displayName ?? session.callerName}
+          color={session.peers[0]?.themeColor ?? session.callerColor}
+          size={116}
+        />
+        <p className="mt-4 text-sm text-white/55">در انتظار پیوستن بقیه…</p>
+      </div>
+    );
+  }
+
+  // Grid: a tile per joined participant (video-less peers get an avatar tile).
+  const tiles = joinedPeers.map((peer) => {
+    const live = kit.remotes.find((r) => r.userId === peer.userId);
+    return (
+      <GridTile key={peer.userId} peer={live} name={peer.displayName} color={peer.themeColor} />
+    );
+  });
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* top info chips */}
+      <div className="absolute inset-x-4 top-4 z-10 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#140b05]/60 px-3 py-1.5 text-xs backdrop-blur">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sage-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-sage-400" />
+          </span>
+          <span className="font-bold">{fa(joinedPeers.length + 1)} نفر</span>
+          <span className="tabular-nums opacity-70">{FORMAT_TIME(elapsed)}</span>
+        </div>
+        {kit.sharing && (
+          <span className="flex items-center gap-1.5 rounded-full border border-sage-400/30 bg-sage-600/80 px-3 py-1.5 text-xs font-bold">
+            <MonitorUp size={13} /> در حال اشتراک…
+          </span>
+        )}
+      </div>
+
+      <div className="grid h-full min-h-0 grid-cols-2 gap-1.5 p-1.5">
+        {tiles}
+        {/* my own camera tile in a corner of the grid too */}
+        {kit.camOn && kit.local && (
+          <div className="relative min-h-0 overflow-hidden rounded-xl border border-white/10 bg-[#170e06]">
+            <MediaFeed
+              stream={kit.local}
+              kind="video"
+              muted
+              className="h-full w-full object-cover"
+              style={{ transform: "scaleX(-1)" }}
+            />
+            <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-semibold text-white/80 backdrop-blur">
+              من
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Full-bleed single-remote layout (1:1 calls keep their familiar look). */
+function SpotlightFeed({
+  kit,
+  live,
+  name,
+  color,
+  localPreview,
+}: {
+  kit: GarmaCallkit;
+  live: RemotePeer | undefined;
+  name: string;
+  color: string;
+  localPreview: boolean;
+}) {
+  const showShare = live?.screen && live.screenOn;
+  return (
+    <div className="relative h-full w-full">
+      {showShare ? (
+        <>
+          <MediaFeed
+            stream={live!.screen!}
+            kind="video"
+            muted
+            className="absolute inset-0 h-full w-full bg-[#170e06] object-contain"
+          />
+          <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
+            <span className="flex items-center gap-2 rounded-full bg-black/55 px-4 py-2 text-sm backdrop-blur">
+              <MonitorUp size={17} /> اشتراک صفحهٔ {name}
+            </span>
+          </div>
+        </>
+      ) : live && live.cam && live.camOn ? (
+        <MediaFeed
+          stream={live.cam}
+          kind="video"
+          muted
+          className="absolute inset-0 h-full w-full bg-[#170e06] object-cover"
+        />
+      ) : (
+        <div className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(circle_at_50%_30%,#2e2118,#0f0a06)]">
+          <div className="rounded-[40px] bg-gradient-to-br from-ember-400/30 to-sage-400/15 p-2">
+            {live && !live.camOn && live.cam ? (
+              <div className="grid h-28 w-28 place-items-center rounded-[40px] bg-[#241408]/80">
+                <CameraOff size={44} className="text-white/40" />
+              </div>
+            ) : (
+              <Avatar name={name} color={color} size={116} />
+            )}
+          </div>
+          <p className="mt-4 text-sm text-white/55">
+            {live && !live.camOn ? `دوربین ${name} خاموش است` : "در حال اتصال تصویر…"}
+          </p>
+        </div>
+      )}
+
+      {/* header chips */}
+      <div className="absolute inset-x-4 top-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#140b05]/60 px-3 py-1.5 text-xs backdrop-blur">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-sage-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-sage-400" />
+          </span>
+          <span className="font-bold">{name}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {kit.camQuality && kit.camOn && (
+            <button
+              type="button"
+              onClick={kit.cycleQuality}
+              title="کیفیت تصویر دوربین تو — برای تغییر ضربه بزن"
+              aria-label="تغییر کیفیت دوربین"
+              className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 bg-[#140b05]/70 px-2.5 py-1 text-[11px] font-bold tracking-wide text-sage-300 backdrop-blur transition hover:border-sage-400/40 hover:text-sage-200 active:scale-95"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-sage-400" />
+              {fa(kit.camQuality)}
+            </button>
+          )}
+          {live && !live.micOn && <Badge icon={<MicOff size={13} />} />}
+          {live && !live.camOn && <Badge icon={<CameraOff size={13} />} />}
+        </div>
+      </div>
+
+      {/* local preview / share preview corner */}
+      {kit.sharing && kit.screenLocal ? (
+        <div className="absolute bottom-5 left-4 z-10 w-44 overflow-hidden rounded-2xl border border-sage-400/40 bg-[#170e06] shadow-2xl">
+          <MediaFeed
+            stream={kit.screenLocal}
+            kind="video"
+            muted
+            className="aspect-video w-full bg-black object-contain"
+          />
+          <button
+            onClick={kit.toggleShare}
+            className="absolute inset-x-1 bottom-1 rounded-full bg-rose-500/95 py-1.5 text-[11px] font-bold text-white backdrop-blur transition hover:bg-rose-600 active:scale-95"
+          >
+            پایان اشتراک صفحه
+          </button>
+        </div>
+      ) : kit.camOn && kit.local && localPreview ? (
+        <div className="absolute bottom-5 left-4 z-10 overflow-hidden rounded-2xl border border-white/15 bg-[#170e06] shadow-2xl">
+          <MediaFeed
+            stream={kit.local}
+            kind="video"
+            muted
+            className="h-40 w-28 object-cover"
+            style={{ transform: "scaleX(-1)" }}
+          />
+          <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-semibold text-white/80 backdrop-blur">
+            من
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One participant's tile in a group video call. */
+function GridTile({
+  peer,
+  name,
+  color,
+}: {
+  peer: RemotePeer | undefined;
+  name: string;
+  color: string;
+}) {
+  const content = peer?.screen && peer.screenOn ? peer.screen : peer?.cam && peer.camOn ? peer.cam : null;
+  return (
+    <div className="relative min-h-0 overflow-hidden rounded-xl border border-white/10 bg-[#170e06]">
+      {content ? (
+        <MediaFeed
+          stream={content}
+          kind="video"
+          muted
+          className="h-full w-full bg-[#170e06] object-contain"
+        />
+      ) : (
+        <div className="grid h-full w-full place-items-center bg-[radial-gradient(circle_at_50%_35%,#2b1c10,#120a05)]">
+          <div className="flex flex-col items-center gap-2 px-2">
+            <Avatar name={name} color={color} size={64} />
+          </div>
+        </div>
+      )}
+      <div className="absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 to-transparent px-2 pb-1.5 pt-4">
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] font-bold">
+          {peer?.screen && peer.screenOn && <MonitorUp size={12} className="shrink-0 text-sage-300" />}
+          <span className="truncate">{name}</span>
+        </span>
+        {peer && !peer.micOn && <MicOff size={12} className="ml-auto shrink-0 text-rose-300" />}
+        {peer && !peer.camOn && peer.cam && <CameraOff size={12} className="shrink-0 text-rose-300" />}
+      </div>
     </div>
   );
 }
@@ -396,7 +677,7 @@ function MediaFeed({
 
 function Badge({ icon }: { icon: ReactNode }) {
   return (
-    <span className="grid h-7 w-7 place-items-center rounded-full border border-white/10 bg-dusk-950/60 text-white/80 backdrop-blur">
+    <span className="grid h-7 w-7 place-items-center rounded-full border border-white/10 bg-[#140b05]/70 text-white/80 backdrop-blur">
       {icon}
     </span>
   );
@@ -408,11 +689,13 @@ function CtrlBtn({
   onClick,
   label,
   on = true,
+  spin = false,
 }: {
   children: ReactNode;
   onClick: () => void;
   label: string;
   on?: boolean;
+  spin?: boolean;
 }) {
   return (
     <div className="flex w-14 shrink-0 flex-col items-center gap-1">
@@ -423,8 +706,9 @@ function CtrlBtn({
         className={[
           "grid h-14 w-14 place-items-center rounded-full border text-white transition duration-150 active:scale-90",
           on
-            ? "border-white/15 bg-white/20 shadow-lg shadow-dusk-950/30 hover:bg-white/30"
+            ? "border-white/15 bg-white/20 shadow-lg shadow-black/40 hover:bg-white/30"
             : "border-rose-400/40 bg-rose-500/25 hover:bg-rose-500/40",
+          spin ? "animate-pulse" : "",
         ].join(" ")}
       >
         {children}
@@ -447,7 +731,7 @@ function ColAction({
   children: ReactNode;
   disabled?: boolean;
 }) {
-  const bg = tone === "rose" ? "bg-rose-500 shadow-rose-500/40 hover:bg-rose-600" : "bg-sage-500 shadow-sage-500/40 hover:bg-sage-600";
+  const bg = tone === "rose" ? "bg-rose-500 shadow-rose-500/40 hover:bg-rose-600" : "bg-sage-600 shadow-black/40 hover:bg-sage-500";
   return (
     <div className="flex flex-col items-center gap-2.5">
       <button

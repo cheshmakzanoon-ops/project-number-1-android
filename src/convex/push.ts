@@ -50,9 +50,9 @@ export const notifyIncomingCall = action({
       throw new Error("unauthorized");
     }
     // runQuery results are untyped here, so pin the shape we need.
-    const calleeIds = (details.members as Array<{ userId: Id<"users"> }>)
-      .map((m) => m.userId)
-      .filter((id) => id !== me._id);
+    const allMembers = (details.members as Array<{ userId: Id<"users">; displayName: string }>);
+    const calleeIds = allMembers.map((m) => m.userId).filter((id) => id !== me._id);
+    const isGroup = calleeIds.length > 1;
 
     const e = env as unknown as Record<string, string | undefined>;
     const pub = e.VAPID_PUBLIC_KEY;
@@ -61,17 +61,28 @@ export const notifyIncomingCall = action({
     webpush.setVapidDetails("mailto:garma@freebuff.app", pub, priv);
 
     const callerName = me.displayName;
+    const kindWord = args.kind === "video" ? "تصویری" : "صوتی";
     const payload = JSON.stringify({
       type: "incoming_call",
       callId: args.callId,
       callerName,
       kind: args.kind,
-      title: args.kind === "video" ? "تماس تصویری گرما" : "تماس صوتی گرما",
-      body:
-        args.kind === "video"
+      // Re-send on every ring: "renotify" in the service worker replaces
+      // older identical-tag notifications and rings again.
+      timestamp: Date.now(),
+      title: isGroup
+        ? args.kind === "video"
+          ? "تماس گروهی تصویری گرما"
+          : "تماس گروهی صوتی گرما"
+        : args.kind === "video"
+          ? "تماس تصویری گرما"
+          : "تماس صوتی گرما",
+      body: isGroup
+        ? `${callerName} با ${allMembers.filter((m) => m.userId !== me._id).length} نفر تماس ${kindWord} گرفت`
+        : args.kind === "video"
           ? `${callerName} می‌خواهد با تو گفتگوی تصویری کند`
           : `${callerName} می‌خواهد با تو حرف بزند`,
-      vibrate: [500, 200, 500, 200, 500],
+      vibrate: [500, 200, 500, 200, 500, 200, 900],
     });
 
     let sent = 0;
