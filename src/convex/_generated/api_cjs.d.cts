@@ -41,6 +41,12 @@ export declare const api: {
       { callId: Id<"calls">; token: string },
       any
     >;
+    cleanupStale: FunctionReference<
+      "mutation",
+      "public",
+      { token: string },
+      any
+    >;
     details: FunctionReference<
       "query",
       "public",
@@ -170,12 +176,7 @@ export declare const api: {
     notifyIncomingCall: FunctionReference<
       "action",
       "public",
-      {
-        callId: Id<"calls">;
-        calleeIds: Array<Id<"users">>;
-        kind: "audio" | "video";
-        token: string;
-      },
+      { callId: Id<"calls">; kind: "audio" | "video"; token: string },
       any
     >;
     vapidPublicKey: FunctionReference<"action", "public", {}, any>;

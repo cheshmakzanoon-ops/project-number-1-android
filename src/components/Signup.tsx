@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { ArrowLeft, Phone, ShieldCheck, Users } from "lucide-react";
 
-export function Signup({ onRegister, busy }: { onRegister: (name: string) => void; busy: boolean }) {
+export function Signup({
+  onRegister,
+  busy,
+  error = null,
+}: {
+  onRegister: (name: string) => void;
+  busy: boolean;
+  error?: string | null;
+}) {
   const [name, setName] = useState("");
   const canGo = name.trim().length >= 2;
 
@@ -56,8 +64,17 @@ export function Signup({ onRegister, busy }: { onRegister: (name: string) => voi
           {!busy && <ArrowLeft size={20} />}
         </button>
 
-        <p className="mt-3 h-5 text-xs text-dusk-400" aria-live="polite">
-          {name.trim() && name.trim().length < 2 ? "حداقل ۲ حرف" : ""}
+        <p className="mt-3 flex min-h-5 items-start justify-center gap-1.5 text-center text-xs leading-5 text-rose-600" aria-live="polite">
+          {error ? (
+            <>
+              <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full bg-rose-500 text-[9px] font-black text-white">
+                !
+              </span>
+              {error}
+            </>
+          ) : name.trim() && name.trim().length < 2 ? (
+            <span className="text-dusk-400">حداقل ۲ حرف</span>
+          ) : null}
         </p>
       </main>
 

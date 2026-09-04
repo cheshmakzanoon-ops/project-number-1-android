@@ -5,7 +5,7 @@ import { Download, Edit, Phone, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { ContactSheet } from "./ContactSheet";
 import { useInstallPrompt } from "../lib/useInstallPrompt";
-import { relative, preview } from "../lib/format";
+import { fa, relative, preview } from "../lib/format";
 import type { DirectoryEntry } from "../lib/types";
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -156,6 +156,14 @@ export function Lobby({
                             ? "گروه جدید"
                             : "گفتگو را شروع کن"}
                       </p>
+                      {row.unread > 0 && (
+                        <span
+                          className="grid h-[20px] min-w-[20px] shrink-0 place-items-center rounded-full bg-ember-500 px-1.5 text-[11px] font-bold leading-none text-white shadow-sm shadow-ember-500/40"
+                          aria-label={`${fa(row.unread)} پیام خوانده‌نشده`}
+                        >
+                          {row.unread > 99 ? "۹۹+" : fa(row.unread)}
+                        </span>
+                      )}
                       {otherId && (
                         <button
                           type="button"

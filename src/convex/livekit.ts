@@ -23,6 +23,18 @@ export const getToken = action({
     const me = await ctx.runQuery(api.users.me, { token: args.token });
     if (!me) throw new Error("unauthorized");
 
+    // ...and must actually be ON this call. Room names are guessable
+    // (`call-<id>`), so without this check any signed-in user could mint a
+    // token and eavesdrop on a room they were never invited to. Only
+    // participants of a still-ringing/active call may join.
+    const details = await ctx.runQuery(api.calls.details, {
+      callId: args.callId,
+      token: args.token,
+    });
+    if (!details || !details.isMine) throw new Error("unauthorized");
+    const status = details.call.status;
+    if (status !== "ringing" && status !== "active") throw new Error("unauthorized");
+
     const room = `call-${args.callId}`;
     const identity = me._id; // user id is a stable, unique LiveKit identity
     const at = new AccessToken(apiKey, apiSecret, {

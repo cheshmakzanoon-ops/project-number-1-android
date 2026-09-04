@@ -28,7 +28,9 @@ export function relative(ts: number, now = Date.now()): string {
   startOfToday.setHours(0, 0, 0, 0);
   const startOfYesterday = startOfToday.getTime() - 86_400_000;
   if (ts >= startOfYesterday) return "دیروز";
-  return clock(ts);
+  // Older than yesterday: a bare clock time would be ambiguous (which day?), so
+  // show the calendar day instead.
+  return formatDay(ts);
 }
 
 export function secondsToClock(s: number): string {

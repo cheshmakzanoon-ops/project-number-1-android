@@ -38,4 +38,6 @@ export interface ChatMessage {
   read: boolean;
   reactions: Record<string, number>;
   usersReacted: boolean;
+  /** Stable client-generated id; lets queued sends match their acked row. */
+  clientMessageId?: string;
 }

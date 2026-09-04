@@ -12,6 +12,14 @@ export const startTyping = mutation({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
+    // Don't let a non-member plant typing rows in a conversation they can't
+    // see — it would surface as a phantom "در حال نوشتن…" on members' screens.
+    const member = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .filter((q) => q.eq(q.field("userId"), me))
+      .first();
+    if (!member) return;
     const now = Date.now();
     const existing = await ctx.db
       .query("typing")
@@ -36,6 +44,12 @@ export const stopTyping = mutation({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
+    const member = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .filter((q) => q.eq(q.field("userId"), me))
+      .first();
+    if (!member) return;
     const existing = await ctx.db
       .query("typing")
       .withIndex("by_conversation_user", (q) =>
@@ -60,6 +74,13 @@ export const whoIsTyping = query({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return [];
+    // Typing presence is private to the conversation's members.
+    const member = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .filter((q) => q.eq(q.field("userId"), me))
+      .first();
+    if (!member) return [];
     const cutoff = Date.now() - TYPING_WINDOW;
     const rows = await ctx.db
       .query("typing")

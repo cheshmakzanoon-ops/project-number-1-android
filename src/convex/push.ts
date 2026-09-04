@@ -3,6 +3,7 @@ import { action, env } from "./_generated/server";
 import { v } from "convex/values";
 import webpush from "web-push";
 import { api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 
 /**
  * Web Push for incoming calls (Node runtime for the `web-push` library).
@@ -27,17 +28,31 @@ export const vapidPublicKey = action({
  * Fire the "incoming call" push to every subscribed device of every callee.
  * Called by the client right after `calls.start` succeeds. Stale endpoints
  * (404/410) are pruned.
+ *
+ * Callees are derived server-side from the call's participant rows — never
+ * taken from the client — so a caller cannot push-spam arbitrary users with
+ * fake rings, and group calls ring every member automatically.
  */
 export const notifyIncomingCall = action({
   args: {
     token: v.string(),
     callId: v.id("calls"),
-    calleeIds: v.array(v.id("users")),
     kind: v.union(v.literal("audio"), v.literal("video")),
   },
   handler: async (ctx, args) => {
     const me = await ctx.runQuery(api.users.me, { token: args.token });
     if (!me) throw new Error("unauthorized");
+    const details = await ctx.runQuery(api.calls.details, {
+      callId: args.callId,
+      token: args.token,
+    });
+    if (!details || !details.isMine || details.call.status !== "ringing") {
+      throw new Error("unauthorized");
+    }
+    // runQuery results are untyped here, so pin the shape we need.
+    const calleeIds = (details.members as Array<{ userId: Id<"users"> }>)
+      .map((m) => m.userId)
+      .filter((id) => id !== me._id);
 
     const e = env as unknown as Record<string, string | undefined>;
     const pub = e.VAPID_PUBLIC_KEY;
@@ -60,7 +75,7 @@ export const notifyIncomingCall = action({
     });
 
     let sent = 0;
-    for (const calleeId of args.calleeIds) {
+    for (const calleeId of calleeIds) {
       const subs = await ctx.runQuery(api.pushSubs.listSubscriptions, { userId: calleeId });
       for (const s of subs) {
         try {

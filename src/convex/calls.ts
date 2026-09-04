@@ -22,6 +22,21 @@ export const start = mutation({
       .first();
     if (!membership) throw new Error("not_member");
 
+    // One live call per person, enforced server-side: if this user already
+    // participates in a ringing or active call (a double-tap that raced past
+    // the client guard, a second device, or a call left open before a
+    // reload), refuse to stack another ringing row on top of it.
+    const myLive = await ctx.db
+      .query("callParticipants")
+      .withIndex("by_user", (q) => q.eq("userId", me))
+      .collect();
+    for (const p of myLive) {
+      const live = await ctx.db.get(p.callId);
+      if (live && (live.status === "ringing" || live.status === "active")) {
+        throw new Error("already_in_call");
+      }
+    }
+
     const now = Date.now();
     const members = await ctx.db
       .query("conversationMembers")
@@ -95,6 +110,8 @@ export const myCalls = query({
       .withIndex("by_user", (q) => q.eq("userId", me))
       .collect();
 
+    const now = Date.now();
+
     const out: Array<{
       callId: Id<"calls">;
       conversationId: Id<"conversations">;
@@ -111,6 +128,11 @@ export const myCalls = query({
       const call = await ctx.db.get(p.callId);
       if (!call) continue;
       if (call.status !== "ringing" && call.status !== "active") continue;
+      // A ring nobody answered ages out server-side ~75s after it started
+      // (see cleanupStale below). Don't surface those ghosts here — the
+      // client's ring timers end at 45s/60s, so without this filter a screen
+      // reopened later could briefly re-present a ring that is already over.
+      if (call.status === "ringing" && now - call.startedAt > 75_000) continue;
 
       // find a member who isn't me
       const otherParts = await ctx.db
@@ -273,5 +295,63 @@ export const sendSignal = mutation({
       payload: args.payload,
       createdAt: Date.now(),
     });
+  },
+});
+
+/**
+ * Housekeeping for calls nobody is around to end. There is no scheduler in
+ * this app, so it piggybacks on the presence heartbeat that every open client
+ * already sends every ~20s (see users.heartbeat) — mutations can run other
+ * mutations, queries cannot, and a heartbeat is the one cheap cadence we have.
+ *
+ *  - ringing calls unanswered for > 75s → missed. The clients' own ring
+ *    timers end at 45s (callee) / 60s (caller); this is the safety net for
+ *    when every screen died mid-ring, so a row can never ring forever or
+ *    resurrect as a ghost ring on a later app open.
+ *  - active calls where EVERY participant's presence went stale (> 10 min) →
+ *    ended. Both phones were abandoned/died mid-call (the LiveKit room is
+ *    empty by then), so the row should not keep "active" forever and block
+ *    those users from ever starting a new call.
+ */
+export const cleanupStale = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const me = await userIdFromToken(ctx, args.token);
+    if (!me) return;
+    const now = Date.now();
+
+    const staleRings = await ctx.db
+      .query("calls")
+      .withIndex("by_status", (q) => q.eq("status", "ringing"))
+      .take(20);
+    for (const call of staleRings) {
+      if (now - call.startedAt > 75_000) {
+        await ctx.db.patch(call._id, { status: "missed", endedAt: now });
+      }
+    }
+
+    const active = await ctx.db
+      .query("calls")
+      .withIndex("by_status", (q) => q.eq("status", "active"))
+      .take(10);
+    for (const call of active) {
+      // Fast path: a recent call can't have stale participants yet.
+      if (now - call.startedAt < 10 * 60_000) continue;
+      const parts = await ctx.db
+        .query("callParticipants")
+        .withIndex("by_call", (q) => q.eq("callId", call._id))
+        .collect();
+      let everyoneGone = parts.length > 0;
+      for (const p of parts) {
+        const u = await ctx.db.get(p.userId);
+        if (!u || now - u.lastSeenAt < 10 * 60_000) {
+          everyoneGone = false;
+          break;
+        }
+      }
+      if (everyoneGone) {
+        await ctx.db.patch(call._id, { status: "ended", endedAt: now });
+      }
+    }
   },
 });

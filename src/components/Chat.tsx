@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { ArrowDown, ArrowRight, Check, Pencil, Phone, RefreshCw, Send, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowRight, Check, Clock, Pencil, Phone, RefreshCw, Send, Trash2 } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { clock, fa, formatDay } from "../lib/format";
 import { loadDraft, loadOutbox, newClientMsgId, saveDraft, saveOutbox, type PendingMessage } from "../lib/outbox";
@@ -122,21 +122,16 @@ export function Chat({
 
   useEffect(() => setMenu(null), [conversationId]);
 
-  // Dismiss the message action menu on any outside tap (mobile) or Escape key.
+  // Dismiss the message action menu with the Escape key (outside taps are
+  // handled by an invisible backdrop rendered under the menu, so touch taps
+  // on the menu's own buttons can never be swallowed by a dismiss listener).
   useEffect(() => {
     if (!menu) return;
-    const dismiss = () => setMenu(null);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setMenu(null);
     };
-    document.addEventListener("click", dismiss);
-    document.addEventListener("touchstart", dismiss);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("click", dismiss);
-      document.removeEventListener("touchstart", dismiss);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [menu]);
 
   useEffect(() => {
@@ -182,11 +177,19 @@ export function Chat({
   const flushOutbox = useCallback(async () => {
     if (flushBusyRef.current) return;
     const cid = convRef.current;
-    if (!outboxRef.current[cid] || outboxRef.current[cid].length === 0) return;
+    const queued = outboxRef.current[cid];
+    if (!queued || queued.length === 0) return;
     flushBusyRef.current = true;
     try {
-      while (outboxRef.current[cid]?.length) {
-        const item = outboxRef.current[cid][0];
+      // Walk the queue from the oldest item. Successfully sent items stay in
+      // the queue until their real row shows up in the subscription (pruned
+      // by the match effect below) — removing them here would make the
+      // pending bubble vanish for a beat before the acked message appears on
+      // slow links. Resending an already-landed item is harmless: the server
+      // dedupes on clientMessageId.
+      let idx = 0;
+      while (idx < queued.length) {
+        const item = queued[idx];
         try {
           await send({
             conversationId: cid,
@@ -198,8 +201,7 @@ export function Chat({
           scheduleRetry();
           return;
         }
-        outboxRef.current[cid] = outboxRef.current[cid].slice(1);
-        saveOutbox(cid, outboxRef.current[cid]);
+        idx += 1;
         bumpOutbox();
       }
     } finally {
@@ -210,6 +212,26 @@ export function Chat({
   flushOutboxRef.current = () => {
     void flushOutbox();
   };
+
+  // Prune queued messages whose real row has arrived in the subscription (the
+  // send landed but the query lagged behind the mutation ack). Keeping them
+  // queued until then is what makes the pending bubble transition seamlessly
+  // into the real message instead of flickering out and back in.
+  useEffect(() => {
+    const cid = convRef.current;
+    const queued = outboxRef.current[cid];
+    if (!queued || queued.length === 0) return;
+    const ackedIds = new Set(
+      ((messages ?? []) as ChatMessage[])
+        .filter((m) => m.clientMessageId && !m.deletedAt)
+        .map((m) => m.clientMessageId as string),
+    );
+    const rest = queued.filter((p) => !ackedIds.has(p.clientMsgId));
+    if (rest.length === queued.length) return;
+    outboxRef.current[cid] = rest;
+    saveOutbox(cid, rest);
+    bumpOutbox();
+  }, [messages, bumpOutbox]);
 
   const queueMessage = useCallback(
     (cid: Id<"conversations">, body: string, clientMsgId: string) => {
@@ -232,6 +254,18 @@ export function Chat({
   }, [bumpOutbox, clearOutboxTimer, conversationId]);
 
   const curPending = outboxRef.current[conversationId] ?? [];
+
+  // When a new message is parked in the queue (or a persisted queue is
+  // restored on open), bring its pending bubble into view — an offline send
+  // should be as visible as an online one.
+  const prevPendingLenRef = useRef(0);
+  useEffect(() => {
+    const prev = prevPendingLenRef.current;
+    prevPendingLenRef.current = curPending.length;
+    if (curPending.length > prev && stickRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [curPending.length]);
 
   // ---- Unfinished-draft persistence ----
   // Restore whatever the user was typing when they last left this
@@ -371,7 +405,7 @@ export function Chat({
       <div className="relative min-h-0 flex-1">
         <div ref={scrollRef} onScroll={onScroll} className="scrollbar-thin h-full space-y-2 overflow-y-auto px-3 py-4">
         <div className="space-y-1">
-          {list.length === 0 && (
+          {list.length === 0 && curPending.length === 0 && (
             <div className="py-14 text-center">
               <div
                 className="mx-auto grid h-20 w-20 place-items-center rounded-[32px]"
@@ -424,6 +458,9 @@ export function Chat({
               </Fragment>
             );
           })}
+          {curPending.map((p) => (
+            <PendingBubble key={p.clientMsgId} body={p.body} />
+          ))}
         </div>
         <div ref={bottomRef} className="h-px" />
         </div>
@@ -469,8 +506,8 @@ export function Chat({
             </span>
             <span className="min-w-0 flex-1 truncate">
               {curPending.length === 1
-                ? "پیام در صف ارسال است — خودکار دوباره تلاش میشود"
-                : "پیامها در صف ارسالاند — خودکار دوباره تلاش میشود"}
+                ? "پیام در حال ارسال است — خودکار دوباره تلاش میشود"
+                : "پیامها در حال ارسالاند — خودکار دوباره تلاش میشود"}
             </span>
             <button
               type="button"
@@ -548,6 +585,28 @@ function dayLabel(ts: number, now = Date.now()): string {
   return formatDay(ts);
 }
 
+/**
+ * A message whose send hasn't been confirmed yet (parked in the outbox while
+ * the connection is flaky). Rendered as a distinctly "in flight" bubble that
+ * turns into the real message automatically once the server row arrives — the
+ * text is never lost and never duplicated.
+ */
+function PendingBubble({ body }: { body: string }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[82%]">
+        <div className="rounded-[20px] rounded-br-md border border-dashed border-ember-400/70 px-4 py-2.5 text-[15px] leading-7 text-dusk-800 shadow-sm" style={{ background: "linear-gradient(135deg, #fdf1e3, #f9e0c4)" }}>
+          <p className="whitespace-pre-wrap break-words">{body}</p>
+          <div className="mt-0.5 flex items-center gap-1 text-[10px] font-bold text-ember-700">
+            <Clock size={11} />
+            <span>در حال ارسال…</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function darken(hex: string, amt = 0.22): string {
   const h = hex.replace("#", "");
   const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
@@ -576,6 +635,21 @@ function Bubble({
   const isMenu = menu === msg._id;
   return (
     <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
+      {/* Invisible backdrop: taps outside the open action menu close it.
+          Rendered BELOW the menu (z-10 < z-20) but ABOVE everything else, so
+          the menu's own buttons receive their taps untouched — a document-
+          level touchstart/click dismiss used to swallow the very tap that
+          should have triggered a reaction/edit/delete on touch devices. */}
+      {isMenu && (
+        <div
+          className="fixed inset-0 z-10"
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenu(null);
+          }}
+          aria-hidden="true"
+        />
+      )}
       <div className={`max-w-[82%] ${mine ? "items-end" : "items-start"}`}>
         <div
           onClick={(e) => {

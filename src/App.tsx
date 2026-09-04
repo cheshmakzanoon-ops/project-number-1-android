@@ -9,7 +9,6 @@ import { CallOverlay } from "./components/CallOverlay";
 import { useCallkit, type CallKind } from "./lib/useCallkit";
 import { usePush } from "./lib/usePush";
 import { Avatar } from "./components/Avatar";
-import { clock } from "./lib/format";
 import type { Id } from "./convex/_generated/dataModel";
 import type { DirectoryEntry } from "./lib/types";
 
@@ -29,6 +28,7 @@ export function App() {
 
   const [active, setActive] = useState<ActiveChat | null>(null);
   const [busy, setBusy] = useState(false);
+  const [authErr, setAuthErr] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
   const callkit = useCallkit(token);
@@ -63,22 +63,38 @@ export function App() {
     if (!session) setMinimized(false);
   }, [session]);
 
-  // Presence heartbeat
+  // Presence heartbeat. Browsers throttle background tabs, so also beat the
+  // moment the tab becomes visible again or the network returns — presence
+  // should never lag behind what the app is actually doing.
   useEffect(() => {
     if (!me) return;
     const beat = () => heartbeat({ token });
     beat();
     const id = window.setInterval(beat, 20_000);
-    return () => window.clearInterval(id);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") beat();
+    };
+    const onOnline = () => beat();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    };
   }, [me, token, heartbeat]);
 
   const handleRegister = useCallback(
     async (name: string) => {
       setBusy(true);
+      setAuthErr(null);
       try {
         await register({ token, displayName: name });
       } catch {
-        /* covered by UI feedback */
+        // The register mutation only fails on a dead connection (the request
+        // never reached the server) — tell the user plainly instead of letting
+        // the button silently do nothing.
+        setAuthErr("نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       } finally {
         setBusy(false);
       }
@@ -154,7 +170,7 @@ export function App() {
   }
 
   if (me === null) {
-    return <Signup onRegister={handleRegister} busy={busy} />;
+    return <Signup onRegister={handleRegister} busy={busy} error={authErr} />;
   }
 
   return (
@@ -189,7 +205,10 @@ export function App() {
         />
       )}
 
-      {session && !minimized && <CallOverlay kit={callkit} onMinimize={() => setMinimized(true)} />}
+      {/* The overlay stays MOUNTED while minimized (invisible) so the call
+          timer keeps ticking and the media/connection keep flowing — unmount-
+          and-remount used to reset the elapsed timer on every restore. */}
+      {session && <CallOverlay kit={callkit} onMinimize={() => setMinimized(true)} hidden={minimized} />}
 
       {session && minimized && (
         <button
@@ -198,8 +217,9 @@ export function App() {
         >
           <Avatar name={session.otherName} color={session.otherColor} size={38} />
           <span className="max-w-[90px] truncate text-sm font-bold">{session.otherName}</span>
-          <span className="text-xs opacity-60">
-            {clock(Date.now())} · {session.kind === "video" ? "تصویری" : "صوتی"}
+          <span className="flex items-center gap-1.5 text-xs text-sage-300">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sage-400" />
+            {session.kind === "video" ? "تماس تصویری" : "تماس صوتی"}
           </span>
         </button>
       )}

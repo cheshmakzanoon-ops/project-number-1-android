@@ -1,6 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { hashToken, userIdFromToken, publicUser } from "./auth";
+import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 
 const PALETTE = [
@@ -97,7 +98,18 @@ export const heartbeat = mutation({
   handler: async (ctx, args) => {
     const userId = await userIdFromToken(ctx, args.token);
     if (!userId) return;
-    await ctx.db.patch(userId, { lastSeenAt: Date.now() });
+    const u = await ctx.db.get(userId);
+    if (!u) return;
+    const now = Date.now();
+    // Skip redundant writes: clients beat every ~20s, and anything fresher
+    // than 15s is already a live presence — this roughly halves the writes
+    // every open device generates.
+    if (now - u.lastSeenAt < 15_000) return;
+    await ctx.db.patch(userId, { lastSeenAt: now });
+    // Opportunistic server housekeeping (dead rings, abandoned active calls).
+    // Every open client already sends this mutation, so cleanup needs no
+    // scheduler of its own.
+    await ctx.runMutation(api.calls.cleanupStale, { token: args.token });
   },
 });
 

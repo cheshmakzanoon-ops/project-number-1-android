@@ -274,8 +274,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const camIntentRef = useRef(false);
   /** Whether the user wants the mic LIVE right now (restored on rejoin). */
   const micIntentRef = useRef(true);
-  /** Ends an orphaned outgoing ring (app relaunched mid-ring) at its TTL. */
-  const staleRingTimerRef = useRef<number | null>(null);
+  /**
+   * The call this screen's user (or a local ring timeout) ended while its
+   * server row is still ringing/active (e.g. the end mutation failed on a
+   * dead link). The lifecycle reconcile below must not re-present/re-join
+   * that call; the ref is cleared once the row actually disappears from
+   * myCalls, and the end mutation is retried whenever connectivity returns.
+   */
+  const leaveRef = useRef<{ callId: Id<"calls">; wanted: "ended" | "declined" | "missed" } | null>(null);
   // ---- App-level "never drop the call" machinery ----
   // LiveKit's own reconnect never gives up (see the reconnectPolicy below).
   // For the rarer case of a FULL disconnect (server restart, room closed,
@@ -362,10 +368,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
     remoteAudioElsRef.current.clear();
     clearRingTtl();
     clearQualityWatch();
-    if (staleRingTimerRef.current != null) {
-      window.clearTimeout(staleRingTimerRef.current);
-      staleRingTimerRef.current = null;
-    }
     const room = roomRef.current;
     if (room) {
       // Null the ref BEFORE disconnecting: every room event handler is scoped
@@ -644,6 +646,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
       opts?: { restoreState?: boolean },
     ): Promise<ConnectResult> => {
       if (!token) return "retryable";
+      // Already connected to this call's room (e.g. a scheduled retry that
+      // fired just after another path reconnected)? Don't connect twice —
+      // LiveKit would kick the older identity connection.
+      const liveRoom = roomRef.current;
+      if (liveRoom && liveRoom.state === ConnectionState.Connected) return true;
       let room: Room | null = null;
       try {
         const { url, token: jwt } = await withTimeout(
@@ -952,6 +959,58 @@ export function useCallkit(token: string | null): GarmaCallkit {
   );
   connectMediaRef.current = connectMedia;
 
+  /**
+   * Re-join a call that has no live screen on this device yet: the app was
+   * (re)loaded while the call was ringing or already active. Starts a media
+   * connect for the given call and keeps the session/overlay consistent.
+   * Used only from the lifecycle reconcile below, which itself only fires
+   * when there is NO current session, so it can't race startCall/accept.
+   */
+  const joinResume = useCallback(
+    (call: CallRow, phase: "outgoing" | "active") => {
+      if (!token) return; // the reconcile only runs when a token exists
+      setReconnecting(phase === "active");
+      // A start/accept/hangup owns the UI right now: hand the rejoin to the
+      // retry loop instead of racing it (and never leave the overlay stuck).
+      if (busyRef.current) {
+        scheduleConnectRetry(call.callId, call.kind);
+        return;
+      }
+      void (async () => {
+        const res = await connectMediaRef.current(call.callId, call.kind, {
+          restoreState: phase === "active",
+        });
+        const s = sessionRef.current;
+        if (!s || s.callId !== call.callId) return; // user moved on meanwhile
+        if (res === true) {
+          setReconnecting(false);
+          setError(null);
+        } else if (res === "unauthorized" || res === "livekit_not_configured") {
+          // Permanent failure (server config/credentials): end for real and
+          // surface the reason.
+          setError(res);
+          try {
+            await endCallMut({
+              callId: call.callId,
+              token,
+              status: phase === "active" ? "ended" : "declined",
+            });
+          } catch {
+            /* noop */
+          }
+          cleanup();
+        } else {
+          // Transient: keep the call up and rejoin in the background.
+          setReconnecting(phase === "active");
+          scheduleConnectRetry(call.callId, call.kind);
+        }
+      })();
+    },
+    [cleanup, endCallMut, scheduleConnectRetry, token],
+  );
+  const joinResumeRef = useRef(joinResume);
+  joinResumeRef.current = joinResume;
+
   // ---- Reconcile call lifecycle from Convex ----
   // How long a ringing call is allowed to sit unanswered before it's treated
   // as missed. Real timers (not query-driven checks): the Convex row never
@@ -966,6 +1025,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     const cur = sessionRef.current;
     const curCall = cur?.callId;
 
+    // The current session's call disappeared server-side (peer hung up, they
+    // declined, or it was retired as stale): tear the local session down.
     if (cur && curCall && !myCalls.some((c) => c.callId === curCall)) {
       if (sawCallRef.current) cleanup();
       return;
@@ -973,6 +1034,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     const call = myCalls[0];
     if (!call) {
       if (cur && sawCallRef.current) cleanup();
+      // Nothing ringing/active anymore — any "leave" intent is fulfilled.
+      leaveRef.current = null;
       return;
     }
     sawCallRef.current = true;
@@ -982,36 +1045,62 @@ export function useCallkit(token: string | null): GarmaCallkit {
     const myPhase = cur?.phase ?? "idle";
 
     // ---- Ring lifecycle guards ----
-    // These keep a ring honest when the screen that owns it is gone: an app
-    // that was closed/relaunched mid-ring must never let the ring resurrect on
-    // the next launch, and a second call ringing in while we're already in one
-    // must be declined instead of stacking silently.
+    // These keep a ring honest when the screen that owns it is gone: a stale
+    // ring must never resurrect on a later app open, and a second call
+    // ringing in while we're already in one is declined instead of stacking.
     if (ringing && curCall !== call.callId) {
       const ttl = isIncomingForMe ? RING_TTL : CALLER_RING_TTL;
       const age = Date.now() - call.startedAt;
-      // Already busy in another call: politely decline so the caller's phone
-      // stops ringing now instead of burning the full ring timeout.
-      if (cur) {
+      // Already busy in another call (live session, or a still-active call
+      // this screen will resume after a reload): politely decline so the
+      // caller's phone stops ringing now instead of burning the full timeout.
+      const hasLiveCall =
+        !!cur || myCalls.some((c) => c.callId !== call.callId && c.status === "active");
+      if (hasLiveCall) {
         void endCallMut({ callId: call.callId, token, status: "declined" });
         return;
       }
-      // The ring outlived its screen (app closed / relaunched mid-ring):
+      // The ring outlived its screen (app closed / relaunched too late):
       // close it as missed so it can never resurrect on the next launch.
       if (age > ttl) {
         void endCallMut({ callId: call.callId, token, status: "missed" });
         return;
       }
-      // My own outgoing ring with no live call screen on this device (the app
-      // was relaunched while the call was still ringing): nobody can present
-      // or answer it here, so end it as missed the moment the ring TTL
-      // elapses.
-      if (!isIncomingForMe) {
-        if (staleRingTimerRef.current != null) window.clearTimeout(staleRingTimerRef.current);
-        staleRingTimerRef.current = window.setTimeout(() => {
-          staleRingTimerRef.current = null;
-          if (sessionRef.current?.callId === call.callId) return;
-          void endCallMut({ callId: call.callId, token, status: "missed" });
-        }, Math.max(500, ttl - age));
+      // The user already declined/hung up THIS call on this screen but the
+      // end mutation hasn't landed yet (dead link): stay quiet until the row
+      // disappears instead of ringing it back. Retry the end whenever the
+      // subscription refreshes — cheap online, silent offline.
+      const leave = leaveRef.current;
+      if (leave && leave.callId === call.callId) {
+        void endCallMut({ callId: call.callId, token, status: leave.wanted }).catch(() => {});
+        return;
+      }
+      // My own outgoing ring with no live screen (the app was relaunched
+      // while the call was still ringing): bring the ring back so the caller
+      // can see/hear it connect when the other side answers. The missed-call
+      // timer is re-armed with only the remaining TTL.
+      if (!isIncomingForMe && !cur) {
+        setSession({
+          callId: call.callId,
+          phase: "outgoing",
+          kind: call.kind,
+          otherName: call.otherName,
+          otherColor: call.otherColor,
+          initiatedByMe: true,
+        });
+        if (ringTtlRef.current == null) {
+          const remain = Math.max(500, ttl - age);
+          ringTtlRef.current = window.setTimeout(() => {
+            const s = sessionRef.current;
+            if (!s || s.callId !== call.callId || s.phase !== "outgoing") return;
+            // Mark this ring as over locally BEFORE the end mutation: if it
+            // fails on a dead link, don't re-present the call every re-render.
+            leaveRef.current = { callId: call.callId, wanted: "missed" };
+            void endCallMut({ callId: call.callId, token, status: "missed" });
+            cleanup();
+          }, remain);
+        }
+        joinResumeRef.current(call, "outgoing");
         return;
       }
       // Fresh incoming ring with no busy call: fall through and present it.
@@ -1033,12 +1122,41 @@ export function useCallkit(token: string | null): GarmaCallkit {
         ringTtlRef.current = window.setTimeout(() => {
           const s = sessionRef.current;
           if (!s || s.callId !== call.callId || s.phase !== "incoming") return;
+          // Mark this ring as over locally BEFORE the end mutation: if it
+          // fails on a dead link, don't re-ring it on the next re-render.
+          leaveRef.current = { callId: call.callId, wanted: "missed" };
           void endCallMut({ callId: call.callId, token, status: "missed" });
           cleanup();
         }, RING_TTL);
       }
       return;
     }
+
+    // I was in an ACTIVE call and the app was (re)loaded while it was still
+    // live — nobody is ringing, we just need to rejoin the room and show the
+    // overlay again instead of stranding the other side in silence. Skipped
+    // when the user just hung up (leaveRef) — instead the end mutation is
+    // retried until the row actually dies.
+    if (call.status === "active" && !cur) {
+      const leave = leaveRef.current;
+      if (leave && leave.callId === call.callId) {
+        void endCallMut({ callId: call.callId, token, status: "ended" }).catch(() => {});
+        return;
+      }
+      setSession({
+        callId: call.callId,
+        phase: "active",
+        kind: call.kind,
+        otherName: call.otherName,
+        otherColor: call.otherColor,
+        initiatedByMe: call.initiatedByMe,
+      });
+      setReconnecting(true);
+      joinResumeRef.current(call, "active");
+      return;
+    }
+
+    // The callee answered our outgoing call: flip to the active phase.
     if (!isIncomingForMe && call.status === "active" && cur?.phase === "outgoing") {
       stopRing();
       clearRingTtl();
@@ -1070,15 +1188,21 @@ export function useCallkit(token: string | null): GarmaCallkit {
         }
         setSession({ callId, phase: "outgoing", kind, otherId, otherName, otherColor, initiatedByMe: true });
         sawCallRef.current = false;
+        // A new call means any earlier "leave" intent is obsolete.
+        leaveRef.current = null;
         // Ring every other device even if the app is closed there. Fire and
-        // forget — a push failure must never block the call itself.
-        void notifyIncoming({ token, callId, calleeIds: [otherId], kind }).catch(() => {});
+        // forget — a push failure must never block the call itself. The
+        // server derives the callees from the call's participants.
+        void notifyIncoming({ token, callId, kind }).catch(() => {});
         // If no one answers, hang up on our own after a while (a real timer —
         // see RING_TTL note above). Guarded so it can't touch an active call.
         if (ringTtlRef.current == null) {
           ringTtlRef.current = window.setTimeout(() => {
             const s = sessionRef.current;
             if (!s || s.callId !== callId || s.phase !== "outgoing") return;
+            // Ring timed out with nobody answering — mark it over locally so
+            // a failed end mutation can't re-present it on the next render.
+            leaveRef.current = { callId, wanted: "missed" };
             void endCallMut({ callId, token, status: "missed" });
             cleanup();
           }, CALLER_RING_TTL);
@@ -1177,6 +1301,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setBusy(true);
     try {
       stopRing();
+      // Remember this call as "user left" BEFORE the end mutation resolves:
+      // if it fails on a dead link the reconcile must not re-present the ring.
+      leaveRef.current = { callId: s.callId, wanted: "declined" };
       try {
         await endCallMut({ callId: s.callId, token, status: "declined" });
       } catch {
@@ -1198,6 +1325,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
     try {
       stopRing();
       const wasActive = s.phase === "active";
+      // Remember this call as "user left": if the end mutation fails (dead
+      // link) the reconcile must not auto-rejoin a call they just hung up.
+      leaveRef.current = { callId: s.callId, wanted: wasActive ? "ended" : "declined" };
       try {
         await endCallMut({ callId: s.callId, token, status: wasActive ? "ended" : "declined" });
       } catch {

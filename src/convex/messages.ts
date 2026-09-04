@@ -45,6 +45,8 @@ export const list = query({
       read: boolean;
       reactions: Record<string, number>;
       usersReacted: boolean;
+      // Lets the client match a queued/optimistic send against the real row.
+      clientMessageId: string | undefined;
     }> = [];
 
     for (const m of msgs.reverse()) {
@@ -69,6 +71,7 @@ export const list = query({
         read: m.senderId === me && !m.deletedAt && m.createdAt <= otherReadAt,
         reactions: counts,
         usersReacted,
+        clientMessageId: m.clientMessageId,
       });
     }
     return out;

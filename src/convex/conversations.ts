@@ -67,8 +67,18 @@ export const myConversations = query({
         lastMessageAt = lastMsg.createdAt;
       }
 
-      // unread
-      const unread = lastMsg && !lastMsg.deletedAt && lastMsg.senderId !== me && lastMsg.createdAt > m.lastReadAt ? 1 : 0;
+      // unread: every message from the other side newer than my read cursor
+      // (counted against the index range, capped at 100 for the badge).
+      let unread = 0;
+      const sinceCursor = await ctx.db
+        .query("messages")
+        .withIndex("by_conversation_created", (q) =>
+          q.eq("conversationId", conv._id).gt("createdAt", m.lastReadAt),
+        )
+        .take(101);
+      for (const msg of sinceCursor) {
+        if (!msg.deletedAt && msg.senderId !== me) unread += 1;
+      }
 
       // dm display name
       let name = conv.name;

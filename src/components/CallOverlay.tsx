@@ -37,7 +37,17 @@ const FORMAT_TIME = (s: number) => {
   return fa(`${mm}:${ss}`);
 };
 
-export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize: () => void }) {
+export function CallOverlay({
+  kit,
+  onMinimize,
+  hidden = false,
+}: {
+  kit: GarmaCallkit;
+  onMinimize: () => void;
+  /** Keep the component mounted (timer keeps ticking, media keeps flowing)
+   * but visually hide it — used for the minimized in-call pill. */
+  hidden?: boolean;
+}) {
   const session = kit.session!;
   const { phase, kind } = session;
   const elapsed = useElapsed(phase);
@@ -95,7 +105,9 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
   return (
     <div
       ref={containerRef}
-      className="safe-area fixed inset-0 z-50 flex flex-col overflow-hidden bg-dusk-950 text-white"
+      className={`safe-area fixed inset-0 z-50 flex flex-col overflow-hidden bg-dusk-950 text-white ${
+        hidden ? "invisible pointer-events-none" : ""
+      }`}
     >
       {/* ambient warm glow for audio/incoming */}
       <div
