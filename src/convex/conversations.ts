@@ -72,7 +72,16 @@ export const myConversations = query({
         let lastMessageSender: string | null = null;
         let lastMessageAt: number | null = null;
         if (lastMsg) {
-          lastMessage = lastMsg.deletedAt ? "پیام حذف شد" : lastMsg.body;
+          const kind = lastMsg.kind ?? "text";
+          if (lastMsg.deletedAt) {
+            lastMessage = "پیام حذف شد";
+          } else if (kind === "voice") {
+            lastMessage = "🎤 پیام صوتی";
+          } else if (kind === "image") {
+            lastMessage = lastMsg.body ? `📷 ${lastMsg.body}` : "📷 عکس";
+          } else {
+            lastMessage = lastMsg.body;
+          }
           const sender = await ctx.db.get(lastMsg.senderId);
           lastMessageSender = sender?.displayName ?? null;
           lastMessageAt = lastMsg.createdAt;
@@ -139,6 +148,7 @@ export const conversation = query({
       displayName: string;
       themeColor: string;
       online: boolean;
+      lastSeenAt: number;
     }> = [];
     const now = Date.now();
     for (const r of memberRows) {
@@ -149,6 +159,7 @@ export const conversation = query({
           displayName: u.displayName,
           themeColor: u.themeColor,
           online: now - u.lastSeenAt < 60_000,
+          lastSeenAt: u.lastSeenAt,
         });
       }
     }
@@ -166,6 +177,7 @@ export const conversation = query({
       name,
       createdAt: conv.createdAt,
       members,
+      muted: mine.mutedAt != null,
     };
   },
 });
@@ -281,6 +293,26 @@ export const markRead = mutation({
       .first();
     if (membership) {
       await ctx.db.patch(membership._id, { lastReadAt: Date.now() });
+    }
+  },
+});
+
+/** Mute/unmute a conversation for me (silences push ringing for its calls). */
+export const setMuted = mutation({
+  args: { conversationId: v.id("conversations"), muted: v.boolean(), token: v.string() },
+  handler: async (ctx, args) => {
+    const me = await userIdFromToken(ctx, args.token);
+    if (!me) return;
+    const membership = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+      .filter((q) => q.eq(q.field("userId"), me))
+      .first();
+    if (!membership) return;
+    if (args.muted) {
+      await ctx.db.patch(membership._id, { mutedAt: Date.now() });
+    } else {
+      await ctx.db.patch(membership._id, { mutedAt: undefined });
     }
   },
 });

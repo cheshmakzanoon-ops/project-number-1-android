@@ -120,6 +120,12 @@ export declare const api: {
       { token?: string },
       any
     >;
+    setMuted: FunctionReference<
+      "mutation",
+      "public",
+      { conversationId: Id<"conversations">; muted: boolean; token: string },
+      any
+    >;
     startDM: FunctionReference<
       "mutation",
       "public",
@@ -154,19 +160,40 @@ export declare const api: {
       { conversationId: Id<"conversations">; limit?: number; token?: string },
       any
     >;
+    listAround: FunctionReference<
+      "query",
+      "public",
+      {
+        anchorId: Id<"messages">;
+        conversationId: Id<"conversations">;
+        token?: string;
+      },
+      any
+    >;
     remove: FunctionReference<
       "mutation",
       "public",
       { messageId: Id<"messages">; token: string },
       any
     >;
+    search: FunctionReference<
+      "query",
+      "public",
+      { conversationId: Id<"conversations">; q: string; token?: string },
+      any
+    >;
     send: FunctionReference<
       "mutation",
       "public",
       {
-        body: string;
+        body?: string;
         clientMessageId?: string;
         conversationId: Id<"conversations">;
+        durationMs?: number;
+        kind?: "text" | "image" | "voice";
+        mimeType?: string;
+        replyToId?: Id<"messages">;
+        storageId?: Id<"_storage">;
         token: string;
       },
       any
@@ -177,6 +204,7 @@ export declare const api: {
       { emoji: string; messageId: Id<"messages">; token: string },
       any
     >;
+    uploadUrl: FunctionReference<"mutation", "public", { token: string }, any>;
   };
   push: {
     notifyIncomingCall: FunctionReference<

@@ -120,12 +120,21 @@ export const details = query({
     const call = await ctx.db.get(args.callId);
     if (!call) return null;
     const participants = await participantsOf(ctx, args.callId);
+    // Per-member mute state (from their conversationMembership row) so call
+    // push can skip people who muted this conversation.
+    const memberRows = await ctx.db
+      .query("conversationMembers")
+      .withIndex("by_conversation", (q) => q.eq("conversationId", call.conversationId))
+      .collect();
+    const mutedByUserId = new Map<string, boolean>();
+    for (const r of memberRows) mutedByUserId.set(r.userId, r.mutedAt != null);
     const members: Array<{
       userId: Id<"users">;
       displayName: string;
       themeColor: string;
       online: boolean;
       joined: boolean;
+      muted: boolean;
     }> = [];
     for (const p of participants) {
       if (p.leftAt) continue;
@@ -137,6 +146,7 @@ export const details = query({
         themeColor: u.themeColor,
         online: Date.now() - u.lastSeenAt < 60_000,
         joined: p.acceptedAt != null,
+        muted: mutedByUserId.get(u._id) ?? false,
       });
     }
     const mine = participants.find((p) => p.userId === me);

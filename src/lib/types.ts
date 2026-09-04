@@ -34,6 +34,8 @@ export interface ConvSummary {
   members: Array<{ user: PublicUser; online: boolean }>;
 }
 
+export type MessageKind = "text" | "image" | "voice";
+
 export interface ChatMessage {
   _id: Id<"messages">;
   senderId: Id<"users">;
@@ -48,4 +50,40 @@ export interface ChatMessage {
   usersReacted: boolean;
   /** Stable client-generated id; lets queued sends match their acked row. */
   clientMessageId?: string;
+  /** text (default) | image | voice — media bytes live in Convex storage. */
+  kind?: MessageKind;
+  /** Resolved storage URL for image/voice messages (null while loading/gone). */
+  url?: string | null;
+  durationMs?: number;
+  /** The message this one quotes (reply), if any. */
+  replyToId?: Id<"messages"> | null;
+  /** Server-resolved quote excerpt: who said it + a snippet + sender color. */
+  reply?: {
+    senderName: string;
+    senderColor: string;
+    body: string;
+    deleted: boolean;
+    kind: MessageKind;
+  } | null;
+}
+
+/** One hit of the in-chat message search. */
+export interface SearchHit {
+  _id: Id<"messages">;
+  body: string;
+  createdAt: number;
+  kind: MessageKind;
+  senderName: string;
+  senderColor: string;
+}
+
+/** A message the user chose to reply to (client-side snapshot for the composer). */
+export interface ReplyQuote {
+  id: Id<"messages">;
+  senderName: string;
+  senderColor: string;
+  body: string;
+  deleted: boolean;
+  kind: MessageKind;
+  isMine: boolean;
 }

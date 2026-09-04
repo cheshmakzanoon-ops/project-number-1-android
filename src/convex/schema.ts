@@ -33,6 +33,9 @@ export default defineSchema({
     userId: v.id("users"),
     joinedAt: v.number(),
     lastReadAt: v.number(),
+    // Set while THIS member muted the conversation: suppresses push ringing
+    // for calls in it (the in-app ring still works when the app is open).
+    mutedAt: v.optional(v.number()),
   })
     .index("by_conversation", ["conversationId"])
     .index("by_user", ["userId"]),
@@ -49,6 +52,16 @@ export default defineSchema({
     // retrying after a flaky-connection failure, so a retry can never create
     // a duplicate even if the first attempt actually landed server-side.
     clientMessageId: v.optional(v.string()),
+    // Media support: text (default) | image | voice. `body` holds the caption
+    // for an image and is empty for voice; the bytes live in Convex storage
+    // and only their id + resolved URL are ever exposed to clients.
+    kind: v.optional(v.union(v.literal("text"), v.literal("image"), v.literal("voice"))),
+    storageId: v.optional(v.id("_storage")),
+    mimeType: v.optional(v.string()),
+    durationMs: v.optional(v.number()),
+    // WhatsApp/Telegram-style reply: this message quotes another message in
+    // the same conversation.
+    replyToId: v.optional(v.id("messages")),
   })
     .index("by_conversation_created", ["conversationId", "createdAt"])
     .index("by_conversation", ["conversationId"])

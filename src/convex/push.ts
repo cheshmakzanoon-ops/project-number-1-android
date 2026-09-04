@@ -50,8 +50,16 @@ export const notifyIncomingCall = action({
       throw new Error("unauthorized");
     }
     // runQuery results are untyped here, so pin the shape we need.
-    const allMembers = (details.members as Array<{ userId: Id<"users">; displayName: string }>);
-    const calleeIds = allMembers.map((m) => m.userId).filter((id) => id !== me._id);
+    const allMembers = (details.members as Array<{
+      userId: Id<"users">;
+      displayName: string;
+      muted?: boolean;
+    }>);
+    // Respect per-conversation mute: a muted chat never rings the phone via
+    // push (the in-app ring still works when the app is open).
+    const calleeIds = allMembers
+      .filter((m) => m.userId !== me._id && !m.muted)
+      .map((m) => m.userId);
     const isGroup = calleeIds.length > 1;
 
     const e = env as unknown as Record<string, string | undefined>;

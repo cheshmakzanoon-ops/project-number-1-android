@@ -136,6 +136,20 @@
   animation: ink-bloom 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
+/* Brief glow used to spotlight a jumped-to message */
+@keyframes bubble-flash {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(242, 192, 105, 0);
+  }
+  35% {
+    box-shadow: 0 0 0 5px rgba(242, 192, 105, 0.4);
+  }
+}
+.animate-flash {
+  animation: bubble-flash 1.7s ease-out both;
+}
+
 @keyframes ring-pulse {
   0% {
     box-shadow: 0 0 0 0 rgba(242, 192, 105, 0.5);
@@ -174,10 +188,37 @@
   }
 }
 
+/* Voice-note equalizer: bars bounce while playing, hold a low hum when idle */
+@keyframes eq-bounce {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.eq-bar {
+  transform-origin: center;
+  animation: eq-bounce 0.9s ease-in-out infinite;
+}
+.eq-idle {
+  animation: none;
+  transform: scaleY(0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eq-bar {
+    animation: none;
+    transform: scaleY(0.35);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-ring,
   .animate-rise,
-  .animate-ink {
+  .animate-ink,
+  .animate-flash {
     animation: none !important;
   }
 }

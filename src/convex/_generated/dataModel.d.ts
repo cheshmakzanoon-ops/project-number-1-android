@@ -130,6 +130,7 @@ export type DataModel = {
       conversationId: Id<"conversations">;
       joinedAt: number;
       lastReadAt: number;
+      mutedAt?: number;
       userId: Id<"users">;
       _id: Id<"conversationMembers">;
       _creationTime: number;
@@ -140,6 +141,7 @@ export type DataModel = {
       | "conversationId"
       | "joinedAt"
       | "lastReadAt"
+      | "mutedAt"
       | "userId";
     indexes: {
       by_id: ["_id"];
@@ -183,8 +185,13 @@ export type DataModel = {
       conversationId: Id<"conversations">;
       createdAt: number;
       deletedAt?: number;
+      durationMs?: number;
       editedAt?: number;
+      kind?: "text" | "image" | "voice";
+      mimeType?: string;
+      replyToId?: Id<"messages">;
       senderId: Id<"users">;
+      storageId?: Id<"_storage">;
       _id: Id<"messages">;
       _creationTime: number;
     };
@@ -196,8 +203,13 @@ export type DataModel = {
       | "conversationId"
       | "createdAt"
       | "deletedAt"
+      | "durationMs"
       | "editedAt"
-      | "senderId";
+      | "kind"
+      | "mimeType"
+      | "replyToId"
+      | "senderId"
+      | "storageId";
     indexes: {
       by_id: ["_id"];
       by_creation_time: ["_creationTime"];
