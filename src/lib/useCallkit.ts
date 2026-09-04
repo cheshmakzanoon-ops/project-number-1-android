@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAction, useMutation, useQuery } from "convex/react";
-import {
+// livekit-client is imported lazily (see livekitLoader) so the app shell
+// never has to download it — it only loads once a call actually starts.
+import type {
   Room,
-  RoomEvent,
-  Track,
-  ConnectionQuality,
-  ConnectionState,
-  type TrackPublication,
-  type VideoEncoding,
+  TrackPublication,
+  VideoEncoding,
 } from "livekit-client";
+import { livekit, loadLiveKit } from "./livekitLoader";
 import { api } from "../convex/_generated/api";
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -315,6 +314,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
    * Capped with a timeout so a stuck permission prompt can never wedge the UI.
    */
   const primeMedia = useCallback(async (kind: CallKind) => {
+    // Start fetching the LiveKit bundle while the permission prompt is up, so
+    // the connect that follows it doesn't wait on a network fetch.
+    void loadLiveKit().catch(() => {});
     try {
       if (!navigator.mediaDevices?.getUserMedia) return;
       const stream = await withTimeout(
@@ -493,6 +495,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     async (tier: number, opts?: { enable?: boolean }): Promise<boolean> => {
       const room = roomRef.current;
       if (!room || tierBusyRef.current) return false;
+      // A room only exists once the LiveKit bundle has loaded.
+      const { Track } = livekit();
       const plan = CAM_TIERS[tier];
       if (!plan) return false;
       // Camera adaptation is only meaningful during video calls — an audio
@@ -646,6 +650,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
       opts?: { restoreState?: boolean },
     ): Promise<ConnectResult> => {
       if (!token) return "retryable";
+      // Bring in the (cached) LiveKit module before touching any of its
+      // symbols — first connect pays the dynamic-import cost, everything
+      // after is instant.
+      const LK = await loadLiveKit();
+      const { Room, RoomEvent, Track, ConnectionQuality, ConnectionState } = LK;
       // Already connected to this call's room (e.g. a scheduled retry that
       // fired just after another path reconnected)? Don't connect twice —
       // LiveKit would kick the older identity connection.

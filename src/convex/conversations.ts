@@ -20,7 +20,7 @@ export const myConversations = query({
       .collect();
 
     const now = Date.now();
-    const out: Array<{
+    type Row = {
       _id: Id<"conversations">;
       kind: "dm" | "group";
       name: string | undefined;
@@ -30,76 +30,83 @@ export const myConversations = query({
       lastMessageSender: string | null;
       lastMessageAt_: number | null;
       members: Array<{ user: UserDoc; online: boolean }>;
-    }> = [];
+    };
 
-    for (const m of memberships) {
-      const conv = await ctx.db.get(m.conversationId);
-      if (!conv) continue;
+    // Build every conversation row concurrently instead of one slow serial
+    // pass — the lobby renders as soon as the slowest conversation resolves.
+    const rows = await Promise.all(
+      memberships.map(async (m): Promise<Row | null> => {
+        const conv = await ctx.db.get(m.conversationId);
+        if (!conv) return null;
 
-      // members
-      const memberRows = await ctx.db
-        .query("conversationMembers")
-        .withIndex("by_conversation", (q) => q.eq("conversationId", conv._id))
-        .collect();
-      const memberUsers = await Promise.all(
-        memberRows.map(async (r) => {
-          const u = await ctx.db.get(r.userId);
-          return u ? { user: u, online: now - u.lastSeenAt < 60_000 } : null;
-        }),
-      );
-      const members = memberUsers.filter(Boolean) as Array<{ user: UserDoc; online: boolean }>;
+        // members + newest message + unread window in parallel
+        const [memberRows, lastMsg, sinceCursor] = await Promise.all([
+          ctx.db
+            .query("conversationMembers")
+            .withIndex("by_conversation", (q) => q.eq("conversationId", conv._id))
+            .collect(),
+          ctx.db
+            .query("messages")
+            .withIndex("by_conversation_created", (q) =>
+              q.eq("conversationId", conv._id),
+            )
+            .order("desc")
+            .first(),
+          ctx.db
+            .query("messages")
+            .withIndex("by_conversation_created", (q) =>
+              q.eq("conversationId", conv._id).gt("createdAt", m.lastReadAt),
+            )
+            .take(101),
+        ]);
 
-      // last message
-      const lastMsg = await ctx.db
-        .query("messages")
-        .withIndex("by_conversation_created", (q) =>
-          q.eq("conversationId", conv._id),
-        )
-        .order("desc")
-        .first();
-      let lastMessage: string | null = null;
-      let lastMessageSender: string | null = null;
-      let lastMessageAt: number | null = null;
-      if (lastMsg) {
-        lastMessage = lastMsg.deletedAt ? "پیام حذف شد" : lastMsg.body;
-        const sender = await ctx.db.get(lastMsg.senderId);
-        lastMessageSender = sender?.displayName ?? null;
-        lastMessageAt = lastMsg.createdAt;
-      }
+        const memberUsers = await Promise.all(
+          memberRows.map(async (r) => {
+            const u = await ctx.db.get(r.userId);
+            return u ? { user: u, online: now - u.lastSeenAt < 60_000 } : null;
+          }),
+        );
+        const members = memberUsers.filter(Boolean) as Array<{ user: UserDoc; online: boolean }>;
 
-      // unread: every message from the other side newer than my read cursor
-      // (counted against the index range, capped at 100 for the badge).
-      let unread = 0;
-      const sinceCursor = await ctx.db
-        .query("messages")
-        .withIndex("by_conversation_created", (q) =>
-          q.eq("conversationId", conv._id).gt("createdAt", m.lastReadAt),
-        )
-        .take(101);
-      for (const msg of sinceCursor) {
-        if (!msg.deletedAt && msg.senderId !== me) unread += 1;
-      }
+        let lastMessage: string | null = null;
+        let lastMessageSender: string | null = null;
+        let lastMessageAt: number | null = null;
+        if (lastMsg) {
+          lastMessage = lastMsg.deletedAt ? "پیام حذف شد" : lastMsg.body;
+          const sender = await ctx.db.get(lastMsg.senderId);
+          lastMessageSender = sender?.displayName ?? null;
+          lastMessageAt = lastMsg.createdAt;
+        }
 
-      // dm display name
-      let name = conv.name;
-      if (conv.kind === "dm") {
-        const other = members.find((mm) => mm.user._id !== me);
-        name = other?.user.displayName ?? "گفتگو";
-      }
+        // unread: every message from the other side newer than my read cursor
+        // (capped at 100 for the badge).
+        let unread = 0;
+        for (const msg of sinceCursor) {
+          if (!msg.deletedAt && msg.senderId !== me) unread += 1;
+        }
 
-      out.push({
-        _id: conv._id,
-        kind: conv.kind,
-        name,
-        lastMessageAt: conv.lastMessageAt,
-        unread,
-        lastMessage,
-        lastMessageSender,
-        lastMessageAt_: lastMessageAt,
-        members,
-      });
-    }
+        // dm display name
+        let name = conv.name;
+        if (conv.kind === "dm") {
+          const other = members.find((mm) => mm.user._id !== me);
+          name = other?.user.displayName ?? "گفتگو";
+        }
 
+        return {
+          _id: conv._id,
+          kind: conv.kind,
+          name,
+          lastMessageAt: conv.lastMessageAt,
+          unread,
+          lastMessage,
+          lastMessageSender,
+          lastMessageAt_: lastMessageAt,
+          members,
+        };
+      }),
+    );
+
+    const out = rows.filter((r): r is Row => r !== null);
     out.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
     return out;
   },

@@ -49,11 +49,20 @@ export const list = query({
       clientMessageId: string | undefined;
     }> = [];
 
-    for (const m of msgs.reverse()) {
-      const reactions = await ctx.db
-        .query("reactions")
-        .withIndex("by_message", (q) => q.eq("messageId", m._id))
-        .collect();
+    const ordered = msgs.reverse();
+    // Fetch reactions for every message in parallel — resolving them one by
+    // one turned every chat open into ~100 serial round trips (a real, felt
+    // delay on slower backends).
+    const reactionsFor = await Promise.all(
+      ordered.map((m) =>
+        ctx.db
+          .query("reactions")
+          .withIndex("by_message", (q) => q.eq("messageId", m._id))
+          .collect(),
+      ),
+    );
+    ordered.forEach((m, i) => {
+      const reactions = reactionsFor[i];
       const counts: Record<string, number> = {};
       let usersReacted = false;
       for (const r of reactions) {
@@ -73,7 +82,7 @@ export const list = query({
         usersReacted,
         clientMessageId: m.clientMessageId,
       });
-    }
+    });
     return out;
   },
 });

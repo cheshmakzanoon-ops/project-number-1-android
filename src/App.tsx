@@ -9,6 +9,12 @@ import { CallOverlay } from "./components/CallOverlay";
 import { useCallkit, type CallKind } from "./lib/useCallkit";
 import { usePush } from "./lib/usePush";
 import { Avatar } from "./components/Avatar";
+import {
+  clearCachedIdentity,
+  loadCachedIdentity,
+  saveCachedIdentity,
+  type CachedIdentity,
+} from "./lib/identityCache";
 import type { Id } from "./convex/_generated/dataModel";
 import type { DirectoryEntry } from "./lib/types";
 
@@ -21,7 +27,16 @@ interface ActiveChat {
 
 export function App() {
   const token = useMemo(() => getDeviceToken(), []);
-  const me = useQuery(api.users.me, token ? { token } : "skip");
+  const queryMe = useQuery(api.users.me, token ? { token } : "skip") as unknown as
+    | (CachedIdentity & { createdAt: number; lastSeenAt: number })
+    | null
+    | undefined;
+  // Every returning device already knows who it is (their name was saved on
+  // this phone) — paint the app immediately from that cache while the `me`
+  // query refreshes in the background, so repeat visits never wait on a
+  // network round-trip before showing anything.
+  const [cachedMe, setCachedMe] = useState<CachedIdentity | null>(() => loadCachedIdentity());
+  const me = queryMe ?? cachedMe;
   const register = useMutation(api.users.register);
   const startDM = useMutation(api.conversations.startDM);
   const heartbeat = useMutation(api.users.heartbeat);
@@ -46,17 +61,29 @@ export function App() {
     }
   }, [me, push]);
 
-  // If the backend hasn't connected after a while, show a clear message rather
-  // than a silent endless spinner, so a dead/filtered connection is obvious and
-  // recoverable from.
+  // Keep the on-device identity in step with the server: cache it once the
+  // query answers, drop it when the backend says this device is unknown (e.g.
+  // after a backend reset) so we don't paint a ghost identity forever.
   useEffect(() => {
-    if (me !== undefined) {
+    if (queryMe === null) {
+      clearCachedIdentity();
+      setCachedMe(null);
+    } else if (queryMe) {
+      saveCachedIdentity(queryMe);
+    }
+  }, [queryMe]);
+
+  // If the backend hasn't connected after a while, show a clear message rather
+  // than a silent endless spinner (or a stale cached shell), so a
+  // dead/filtered connection is obvious and recoverable from.
+  useEffect(() => {
+    if (queryMe !== undefined) {
       setConnTrouble(false);
       return;
     }
     const t = window.setTimeout(() => setConnTrouble(true), 9000);
     return () => window.clearTimeout(t);
-  }, [me]);
+  }, [queryMe]);
 
   useEffect(() => {
     // leaving the overlay (call ended) also clears minimized state
@@ -145,40 +172,49 @@ export function App() {
   }, [active, callkit]);
 
   // ---- Render states ----
-  if (me === undefined) {
-    return (
-      <div className="grid h-full place-items-center bg-dusk-50">
-        <div className="flex flex-col items-center gap-4">
-          <div className="h-10 w-10 animate-pulse rounded-full bg-ember-400/50" />
-          {connTrouble && (
-            <div className="animate-rise mx-6 max-w-xs rounded-3xl border border-dusk-100 bg-white/90 p-6 text-center shadow-xl backdrop-blur">
-              <p className="text-lg font-extrabold text-dusk-900">اتصال برقرار نشد</p>
-              <p className="mt-2 text-sm leading-6 text-dusk-500">
-                انگار به سرور وصل نمی‌شویم. اتصال اینترنت را بررسی کن و دوباره تلاش کن.
-              </p>
-              <button
-                onClick={() => window.location.reload()}
-                className="mt-5 rounded-full bg-ember-500 px-7 py-3 font-bold text-white shadow-lg shadow-ember-500/30 transition hover:bg-ember-600 active:scale-95"
-              >
-                تلاش دوباره
-              </button>
-            </div>
-          )}
-        </div>
+  const connTroubleScreen = (showPanel: boolean) => (
+    <div className="grid h-full place-items-center bg-dusk-50">
+      <div className="flex flex-col items-center gap-4">
+        {!showPanel && <div className="h-10 w-10 animate-pulse rounded-full bg-ember-400/50" />}
+        {showPanel && (
+          <div className="animate-rise mx-6 max-w-xs rounded-3xl border border-dusk-100 bg-white/90 p-6 text-center shadow-xl backdrop-blur">
+            <p className="text-lg font-extrabold text-dusk-900">اتصال برقرار نشد</p>
+            <p className="mt-2 text-sm leading-6 text-dusk-500">
+              انگار به سرور وصل نمی‌شویم. اتصال اینترنت را بررسی کن و دوباره تلاش کن.
+            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-5 rounded-full bg-ember-500 px-7 py-3 font-bold text-white shadow-lg shadow-ember-500/30 transition hover:bg-ember-600 active:scale-95"
+            >
+              تلاش دوباره
+            </button>
+          </div>
+        )}
       </div>
-    );
-  }
+    </div>
+  );
 
-  if (me === null) {
+  // No connection and no (refreshed) identity: whatever the screen would show
+  // is stale, so surface the retry panel instead of a silent skeleton.
+  if (connTrouble && queryMe === undefined) return connTroubleScreen(true);
+  // First visit on this device: nothing cached yet, so wait briefly for the
+  // backend to say whether this token is known.
+  if (queryMe === undefined && cachedMe === null) return connTroubleScreen(false);
+  // The backend doesn't know this device token (fresh install / reset): sign up.
+  if (queryMe === null) {
     return <Signup onRegister={handleRegister} busy={busy} error={authErr} />;
   }
+
+  // Past the gates above this is guaranteed: either the query answered with a
+  // user, or a cached identity stands in while the query refreshes.
+  const identity = me as CachedIdentity;
 
   return (
     <div className="mx-auto h-full max-w-md shadow-xl shadow-dusk-200/40" style={{ background: "var(--color-dusk-50)" }}>
       {active ? (
         <Chat
           token={token}
-          meColor={me.themeColor}
+          meColor={identity.themeColor}
           conversationId={active.cid}
           name={active.name}
           color={active.color}
@@ -188,8 +224,8 @@ export function App() {
       ) : (
         <Lobby
           token={token}
-          meId={me._id}
-          meName={me.displayName}
+          meId={identity._id}
+          meName={identity.displayName}
           onOpen={(cid, name, color, otherId) =>
             setActive({
               cid: cid as Id<"conversations">,

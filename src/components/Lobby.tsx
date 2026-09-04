@@ -1,13 +1,19 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { Download, Edit, Phone, X } from "lucide-react";
 import { Avatar } from "./Avatar";
-import { ContactSheet } from "./ContactSheet";
 import { useInstallPrompt } from "../lib/useInstallPrompt";
 import { fa, relative, preview } from "../lib/format";
 import type { DirectoryEntry } from "../lib/types";
 import type { Id } from "../convex/_generated/dataModel";
+
+// ContactSheet pulls in framer-motion (~100KB), which is only needed when
+// the "گفتگوی جدید" sheet is actually opened — so it's split into its own
+// chunk and fetched on demand instead of delaying the first paint.
+const ContactSheet = lazy(() =>
+  import("./ContactSheet").then((m) => ({ default: m.ContactSheet })),
+);
 
 type LobbyRow = {
   _id: Id<"conversations">;
@@ -196,14 +202,16 @@ export function Lobby({
         گفتگوی جدید
       </button>
 
-      <ContactSheet
-        open={sheet}
-        onClose={() => setSheet(false)}
-        contacts={directory ?? []}
-        onMessage={onMessageContact}
-        onVideo={onVideoContact}
-        onAudio={onAudioContact}
-      />
+      <Suspense fallback={null}>
+        <ContactSheet
+          open={sheet}
+          onClose={() => setSheet(false)}
+          contacts={directory ?? []}
+          onMessage={onMessageContact}
+          onVideo={onVideoContact}
+          onAudio={onAudioContact}
+        />
+      </Suspense>
     </div>
   );
 }
