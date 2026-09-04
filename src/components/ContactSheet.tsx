@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Camera, MessageCircle, Phone, X } from "lucide-react";
+import { Camera, Check, Link, MessageCircle, Phone, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import type { DirectoryEntry } from "../lib/types";
 
@@ -19,6 +19,38 @@ export function ContactSheet({
   onVideo: (c: DirectoryEntry) => void;
   onAudio: (c: DirectoryEntry) => void;
 }) {
+  // Family onboarding lives on a plain link — copying the app's own URL is
+  // the only "invite" the app needs (no accounts to create on the other end).
+  const [copied, setCopied] = useState(false);
+  const copyInvite = () => {
+    const url = window.location.origin;
+    const done = () => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    };
+    const fallback = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+        done();
+      } catch {
+        /* clipboard unavailable */
+      }
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(url).then(done, fallback);
+    } else {
+      fallback();
+    }
+  };
+
   return (
     <AnimatePresence>
       {open && (
@@ -51,6 +83,26 @@ export function ContactSheet({
                 ? "هنوز کسی ثبت نام نکرده. پیوند را پخش کن تا بقیهٔ خانواده بیایند."
                 : "با یک نفر تماس بگیر یا پیام بده."}
             </p>
+            <button
+              type="button"
+              onClick={copyInvite}
+              className={`mx-6 mb-3 flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-bold transition active:scale-[0.98] ${
+                copied
+                  ? "border border-sage-300 bg-sage-50 text-sage-700"
+                  : "border border-ember-200 bg-ember-50 text-ember-700 hover:bg-ember-100"
+              }`}
+              aria-live="polite"
+            >
+              {copied ? (
+                <>
+                  <Check size={16} /> پیوند کپی شد — برای مامان و بابا بفرست
+                </>
+              ) : (
+                <>
+                  <Link size={16} /> کپی پیوند دعوت خانواده
+                </>
+              )}
+            </button>
             <div className="mb-2 max-h-[52vh] overflow-y-auto px-3 pb-4">
               {contacts.map((c) => (
                 <div

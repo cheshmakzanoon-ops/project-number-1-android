@@ -74,6 +74,14 @@ export function Chat({
   }, [typers]);
   const someoneTyping = typingVisible;
 
+  // True while the reader is at/near the newest message; new messages only
+  // auto-follow when this is set, so someone reading history is never yanked
+  // down to the bottom mid-scroll.
+  const stickRef = useRef(true);
+  // Set when the user sends a message: their own send always scrolls into
+  // view even if they were reading older messages.
+  const forceScrollRef = useRef(false);
+
   const scrollToBottom = () => {
     scrolledRef.current = true;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -81,16 +89,26 @@ export function Chat({
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > 480);
+    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickRef.current = fromBottom < 160;
+    setShowJump(fromBottom > 480);
   };
 
   useEffect(() => {
-    if (messages && !scrolledRef.current) {
+    if (!messages) return;
+    if (!scrolledRef.current) {
+      // First arrival in a freshly opened conversation: anchor at the newest.
       bottomRef.current?.scrollIntoView({ behavior: "auto" });
       scrolledRef.current = true;
-    } else if (messages) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      return;
     }
+    if (forceScrollRef.current) {
+      forceScrollRef.current = false;
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      return;
+    }
+    // Follow new incoming messages only while already at the bottom.
+    if (stickRef.current) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, list.length]);
 
   useEffect(() => {
@@ -306,6 +324,8 @@ export function Chat({
       }
       setDraft("");
       saveDraft(conversationId, "");
+      // Own sends scroll into view even when reading older history above.
+      forceScrollRef.current = true;
       scrolledRef.current = true;
     } finally {
       setSending(false);
