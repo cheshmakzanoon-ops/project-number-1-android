@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "./convex/_generated/api";
 import { getDeviceToken } from "./lib/token";
@@ -7,6 +7,7 @@ import { Lobby } from "./components/Lobby";
 import { Chat } from "./components/Chat";
 import { CallOverlay } from "./components/CallOverlay";
 import { useCallkit, type CallKind } from "./lib/useCallkit";
+import { usePush } from "./lib/usePush";
 import { Avatar } from "./components/Avatar";
 import { clock } from "./lib/format";
 import type { Id } from "./convex/_generated/dataModel";
@@ -31,7 +32,19 @@ export function App() {
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
   const callkit = useCallkit(token);
+  const push = usePush(token);
   const { session } = callkit;
+
+  // Ask once for notification permission right after the user joins: without
+  // it we cannot ring this phone when the app is closed and someone calls.
+  const askedNotifRef = useRef(false);
+  useEffect(() => {
+    if (!me || askedNotifRef.current) return;
+    if (push.notifPerm !== "granted") {
+      askedNotifRef.current = true;
+      void push.enable();
+    }
+  }, [me, push]);
 
   // If the backend hasn't connected after a while, show a clear message rather
   // than a silent endless spinner, so a dead/filtered connection is obvious and

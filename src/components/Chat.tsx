@@ -1,9 +1,10 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { ArrowDown, ArrowRight, Check, Pencil, Phone, Send, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowRight, Check, Pencil, Phone, RefreshCw, Send, Trash2 } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { clock, fa, formatDay } from "../lib/format";
+import { loadDraft, loadOutbox, newClientMsgId, saveDraft, saveOutbox, type PendingMessage } from "../lib/outbox";
 import type { ChatMessage } from "../lib/types";
 import type { Id } from "../convex/_generated/dataModel";
 
@@ -43,6 +44,13 @@ export function Chat({
   const [draft, setDraft] = useState("");
   const [editing, setEditing] = useState<Id<"messages"> | null>(null);
   const [menu, setMenu] = useState<Id<"messages"> | null>(null);
+  const [sending, setSending] = useState(false);
+  const [sendErr, setSendErr] = useState(false);
+  const sendErrTimerRef = useRef<number | null>(null);
+  // On a flaky link the peer's "typing" row can linger forever (their app was
+  // killed mid-keystroke). Mirror the server signal through a short local
+  // timer so the label always clears even if the row never gets removed.
+  const [typingVisible, setTypingVisible] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrolledRef = useRef(false);
@@ -52,7 +60,19 @@ export function Chat({
   const typingStopRef = useRef<number | null>(null);
 
   const list = (messages ?? []) as ChatMessage[];
-  const someoneTyping = (typers?.length ?? 0) > 0;
+  // `typers` arrives as a fresh array whenever the backend re-runs the query
+  // (each keystroke refresh), so this effect re-arms the 7s auto-clear while
+  // the peer keeps typing and hides the label ~7s after they stop.
+  useEffect(() => {
+    if (!typers || typers.length === 0) {
+      setTypingVisible(false);
+      return;
+    }
+    setTypingVisible(true);
+    const t = window.setTimeout(() => setTypingVisible(false), 7000);
+    return () => window.clearTimeout(t);
+  }, [typers]);
+  const someoneTyping = typingVisible;
 
   const scrollToBottom = () => {
     scrolledRef.current = true;
@@ -84,6 +104,23 @@ export function Chat({
 
   useEffect(() => setMenu(null), [conversationId]);
 
+  // Dismiss the message action menu on any outside tap (mobile) or Escape key.
+  useEffect(() => {
+    if (!menu) return;
+    const dismiss = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
+    document.addEventListener("click", dismiss);
+    document.addEventListener("touchstart", dismiss);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", dismiss);
+      document.removeEventListener("touchstart", dismiss);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
   useEffect(() => {
     // Tell the peer we're no longer typing when we leave the conversation.
     return () => {
@@ -92,6 +129,133 @@ export function Chat({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, token]);
+
+  // ---- Flaky-connection outbox --------------------------------------------
+  // A message whose send failed is never dropped: it is parked in a persisted
+  // per-conversation queue (with the SAME clientMessageId the failed attempt
+  // used, so a retry can never duplicate it server-side) and retried
+  // automatically with capped backoff, on every "online" event, and whenever
+  // the conversation is reopened.
+  const outboxRef = useRef<Record<string, PendingMessage[]>>({});
+  const [, setOutboxTick] = useState(0);
+  const flushBusyRef = useRef(false);
+  const outboxTimerRef = useRef<number | null>(null);
+  const outboxDelayRef = useRef(2000);
+  const convRef = useRef(conversationId);
+  convRef.current = conversationId;
+
+  const bumpOutbox = useCallback(() => setOutboxTick((t) => t + 1), []);
+  const clearOutboxTimer = useCallback(() => {
+    if (outboxTimerRef.current != null) {
+      window.clearTimeout(outboxTimerRef.current);
+      outboxTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleRetry = useCallback(() => {
+    if (outboxTimerRef.current != null) return;
+    outboxTimerRef.current = window.setTimeout(() => {
+      outboxTimerRef.current = null;
+      void flushOutboxRef.current();
+    }, outboxDelayRef.current);
+    outboxDelayRef.current = Math.min(outboxDelayRef.current * 2, 30_000);
+  }, []);
+
+  const flushOutbox = useCallback(async () => {
+    if (flushBusyRef.current) return;
+    const cid = convRef.current;
+    if (!outboxRef.current[cid] || outboxRef.current[cid].length === 0) return;
+    flushBusyRef.current = true;
+    try {
+      while (outboxRef.current[cid]?.length) {
+        const item = outboxRef.current[cid][0];
+        try {
+          await send({
+            conversationId: cid,
+            body: item.body,
+            token,
+            clientMessageId: item.clientMsgId,
+          });
+        } catch {
+          scheduleRetry();
+          return;
+        }
+        outboxRef.current[cid] = outboxRef.current[cid].slice(1);
+        saveOutbox(cid, outboxRef.current[cid]);
+        bumpOutbox();
+      }
+    } finally {
+      flushBusyRef.current = false;
+    }
+  }, [bumpOutbox, scheduleRetry, send, token]);
+  const flushOutboxRef = useRef<() => void>(() => {});
+  flushOutboxRef.current = () => {
+    void flushOutbox();
+  };
+
+  const queueMessage = useCallback(
+    (cid: Id<"conversations">, body: string, clientMsgId: string) => {
+      const list = [...(outboxRef.current[cid] ?? [])];
+      list.push({ body, clientMsgId, queuedAt: Date.now() });
+      outboxRef.current[cid] = list;
+      saveOutbox(cid, list);
+      bumpOutbox();
+      outboxDelayRef.current = 2000;
+      scheduleRetry();
+    },
+    [bumpOutbox, scheduleRetry],
+  );
+
+  const dropPending = useCallback(() => {
+    outboxRef.current[conversationId] = [];
+    saveOutbox(conversationId, []);
+    clearOutboxTimer();
+    bumpOutbox();
+  }, [bumpOutbox, clearOutboxTimer, conversationId]);
+
+  const curPending = outboxRef.current[conversationId] ?? [];
+
+  // ---- Unfinished-draft persistence ----
+  // Restore whatever the user was typing when they last left this
+  // conversation (or reloaded the page while a send was queued offline), and
+  // keep it saved while they type. Skipped while editing an existing message.
+  const draftConvRef = useRef<Id<"conversations"> | null>(null);
+  useEffect(() => {
+    if (editing) return;
+    if (draftConvRef.current !== conversationId) return; // conv just switched
+    saveDraft(conversationId, draft);
+  }, [conversationId, draft, editing]);
+  useEffect(() => {
+    draftConvRef.current = conversationId;
+    setDraft(loadDraft(conversationId));
+  }, [conversationId]);
+
+  // Load the queue for the open conversation and auto-flush shortly after
+  // opening (covers messages parked earlier that never got retried).
+  useEffect(() => {
+    clearOutboxTimer();
+    if (!outboxRef.current[conversationId]) {
+      outboxRef.current[conversationId] = loadOutbox(conversationId);
+      bumpOutbox();
+    }
+    outboxDelayRef.current = 2000;
+    if ((outboxRef.current[conversationId] ?? []).length > 0) {
+      const t = window.setTimeout(() => {
+        void flushOutboxRef.current();
+      }, 900);
+      return () => window.clearTimeout(t);
+    }
+  }, [bumpOutbox, clearOutboxTimer, conversationId]);
+
+  // The browser says we're back online: try the queue right away.
+  useEffect(() => {
+    const onOnline = () => {
+      outboxDelayRef.current = 2000;
+      void flushOutboxRef.current();
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
 
   const notifyTyping = () => {
     if (editing) return;
@@ -110,22 +274,50 @@ export function Chat({
 
   const onSend = async () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || sending) return;
     if (typingStopRef.current) window.clearTimeout(typingStopRef.current);
     void stopTypingMut({ conversationId, token });
-    setDraft("");
+    setSending(true);
+    setSendErr(false);
     try {
       if (editing) {
-        await editMut({ messageId: editing, body: text, token });
+        try {
+          await editMut({ messageId: editing, body: text, token });
+        } catch {
+          setSendErr(true);
+          if (sendErrTimerRef.current) window.clearTimeout(sendErrTimerRef.current);
+          sendErrTimerRef.current = window.setTimeout(() => setSendErr(false), 5000);
+          return;
+        }
         setEditing(null);
       } else {
-        await send({ conversationId, body: text, token });
+        // Every logical message gets a stable client id so an outbox retry can
+        // never create a duplicate even if this first attempt actually landed.
+        const clientMsgId = newClientMsgId();
+        try {
+          await send({ conversationId, body: text, token, clientMessageId: clientMsgId });
+        } catch {
+          // Never eat the user's message: park it in the persisted outbox and
+          // auto-retry with backoff instead of losing the text.
+          queueMessage(conversationId, text, clientMsgId);
+          saveDraft(conversationId, "");
+          return;
+        }
       }
+      setDraft("");
+      saveDraft(conversationId, "");
       scrolledRef.current = true;
-    } catch {
-      /* noop */
+    } finally {
+      setSending(false);
     }
   };
+
+  // Clear the notices/timers when the screen unmounts so stale timers never
+  // fire into a fresh conversation.
+  useEffect(() => () => {
+    if (sendErrTimerRef.current) window.clearTimeout(sendErrTimerRef.current);
+    if (outboxTimerRef.current) window.clearTimeout(outboxTimerRef.current);
+  }, []);
 
   return (
     <div className="flex h-full flex-col bg-dusk-50">
@@ -148,7 +340,8 @@ export function Chat({
         <button
           onClick={onCall}
           className="grid h-11 w-11 place-items-center rounded-full bg-ember-500 text-white shadow-md shadow-ember-500/30 transition hover:bg-ember-600 active:scale-95"
-          aria-label="تماس صوتی"
+          aria-label="تماس تصویری"
+          title="تماس تصویری"
         >
           <Phone size={19} />
         </button>
@@ -189,7 +382,13 @@ export function Chat({
                   meColor={meColor}
                   menu={menu}
                   setMenu={setMenu}
-                  onReact={(emoji) => react({ messageId: m._id, emoji, token })}
+                  onReact={(emoji) => {
+                    // Close the action menu immediately (the emoji picker is
+                    // inside the document-level dismiss zone, so without this
+                    // the menu stays open after every reaction).
+                    setMenu(null);
+                    void react({ messageId: m._id, emoji, token }).catch(() => {});
+                  }}
                   onEdit={() => {
                     if (m.isMine && !m.deletedAt) {
                       setEditing(m._id);
@@ -221,11 +420,57 @@ export function Chat({
 
       {/* composer */}
       <div className="safe-area flex flex-col gap-1.5 border-t border-dusk-100/70 bg-white/85 px-3 pt-2.5 pb-3 backdrop-blur">
+        {sendErr && (
+          <div className="animate-rise flex items-center gap-2 rounded-xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-600 ring-1 ring-rose-200">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-rose-500 text-[10px] font-black text-white">
+              !
+            </span>
+            ویرایش ذخیره نشد — دوباره تلاش کن
+            <button
+              onClick={() => setSendErr(false)}
+              className="mr-auto font-black text-rose-400 transition hover:text-rose-600"
+              aria-label="بستن"
+            >
+              ✕
+            </button>
+          </div>
+        )}
         {editing && (
           <div className="mb-0.5 flex items-center gap-2 rounded-xl bg-ember-100 px-3 py-2 text-sm text-ember-700">
             <Pencil size={15} /> ویرایش پیام
             <button onClick={() => { setEditing(null); setDraft(""); }} className="font-bold">✕</button>
             <span className="ml-auto truncate text-xs text-ember-500">{draft || "…"}</span>
+          </div>
+        )}
+        {curPending.length > 0 && (
+          <div className="animate-rise flex items-center gap-2 rounded-xl bg-ember-50 px-3 py-2 text-xs font-bold text-ember-800 ring-1 ring-ember-200">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-ember-400 text-[10px] font-black text-white">
+              {fa(curPending.length)}
+            </span>
+            <span className="min-w-0 flex-1 truncate">
+              {curPending.length === 1
+                ? "پیام در صف ارسال است — خودکار دوباره تلاش میشود"
+                : "پیامها در صف ارسالاند — خودکار دوباره تلاش میشود"}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                outboxDelayRef.current = 2000;
+                void flushOutbox();
+              }}
+              className="flex shrink-0 items-center gap-1 rounded-full bg-ember-500 px-3 py-1.5 text-white transition hover:bg-ember-600 active:scale-95"
+            >
+              <RefreshCw size={12} /> ارسال
+            </button>
+            <button
+              type="button"
+              onClick={dropPending}
+              aria-label="حذف از صف ارسال"
+              title="حذف از صف"
+              className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-ember-400 transition hover:bg-ember-100 active:scale-90"
+            >
+              ✕
+            </button>
           </div>
         )}
         <div className="flex items-end gap-2">
@@ -248,7 +493,10 @@ export function Chat({
         />
         <button
           onClick={onSend}
-          className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-ember-400 to-ember-600 text-white shadow-lg shadow-ember-500/30 transition hover:from-ember-500 hover:to-ember-700 active:scale-90"
+          disabled={sending}
+          className={`grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-ember-400 to-ember-600 text-white shadow-lg shadow-ember-500/30 transition hover:from-ember-500 hover:to-ember-700 active:scale-90 ${
+            sending ? "cursor-wait opacity-70" : ""
+          }`}
           aria-label="ارسال"
         >
           <Send size={19} style={{ transform: "scaleX(-1)" }} />
@@ -342,8 +590,8 @@ function Bubble({
               ))}
           </div>
 
-          {/* reaction chips */}
-          {Object.keys(msg.reactions).length > 0 && (
+          {/* reaction chips (hidden on deleted messages) */}
+          {!msg.deletedAt && Object.keys(msg.reactions).length > 0 && (
             <div
               className={`absolute -bottom-3 flex gap-0.5 rounded-full border border-dusk-100 bg-white px-1.5 py-0.5 text-sm shadow-sm ${
                 mine ? "right-2" : "left-2"

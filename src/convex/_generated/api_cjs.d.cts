@@ -151,13 +151,58 @@ export declare const api: {
     send: FunctionReference<
       "mutation",
       "public",
-      { body: string; conversationId: Id<"conversations">; token: string },
+      {
+        body: string;
+        clientMessageId?: string;
+        conversationId: Id<"conversations">;
+        token: string;
+      },
       any
     >;
     toggleReaction: FunctionReference<
       "mutation",
       "public",
       { emoji: string; messageId: Id<"messages">; token: string },
+      any
+    >;
+  };
+  push: {
+    notifyIncomingCall: FunctionReference<
+      "action",
+      "public",
+      {
+        callId: Id<"calls">;
+        calleeIds: Array<Id<"users">>;
+        kind: "audio" | "video";
+        token: string;
+      },
+      any
+    >;
+    vapidPublicKey: FunctionReference<"action", "public", {}, any>;
+  };
+  pushSubs: {
+    listSubscriptions: FunctionReference<
+      "query",
+      "public",
+      { userId: Id<"users"> },
+      any
+    >;
+    pruneSubscription: FunctionReference<
+      "mutation",
+      "public",
+      { endpoint: string },
+      any
+    >;
+    removeSubscription: FunctionReference<
+      "mutation",
+      "public",
+      { endpoint: string; token: string },
+      any
+    >;
+    saveSubscription: FunctionReference<
+      "mutation",
+      "public",
+      { auth: string; endpoint: string; p256dh: string; token: string },
       any
     >;
   };

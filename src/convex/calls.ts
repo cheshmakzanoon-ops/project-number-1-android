@@ -139,6 +139,9 @@ export const myCalls = query({
         initiatedByMe: call.initiatorId === me,
       });
     }
+    // Newest first: the client reconciles from index 0, and a stale row from
+    // a crashed call must never shadow a fresh ring.
+    out.sort((a, b) => b.startedAt - a.startedAt);
     return out;
   },
 });
@@ -151,6 +154,10 @@ export const answer = mutation({
     if (!me) return;
     const call = await ctx.db.get(args.callId);
     if (!call) return;
+    // Only a still-ringing call may be answered. Without this guard a late
+    // accept after the caller hung up would resurrect the call into a room
+    // with nobody in it.
+    if (call.status !== "ringing") return;
     await ctx.db.patch(args.callId, { status: "active" });
   },
 });
@@ -170,8 +177,14 @@ export const end = mutation({
     const call = await ctx.db.get(args.callId);
     if (!call) return;
     if (call.status === "ended") return;
+    const wanted = args.status ?? "ended";
+    // A call that has been ANSWERED may only be terminated by an explicit
+    // "ended". Stale "missed"/"declined" signals — a ring timeout that fired
+    // on a second device, a busy-decline that raced an accept, an app that
+    // was reopened after the call connected — must never kill a live call.
+    if (call.status === "active" && wanted !== "ended") return;
     await ctx.db.patch(args.callId, {
-      status: args.status ?? "ended",
+      status: wanted,
       endedAt: Date.now(),
     });
     const parts = await ctx.db

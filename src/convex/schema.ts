@@ -45,15 +45,31 @@ export default defineSchema({
     createdAt: v.number(),
     editedAt: v.optional(v.number()),
     deletedAt: v.optional(v.number()),
+    // Opaque id the client generates once per logical message and reuses when
+    // retrying after a flaky-connection failure, so a retry can never create
+    // a duplicate even if the first attempt actually landed server-side.
+    clientMessageId: v.optional(v.string()),
   })
     .index("by_conversation_created", ["conversationId", "createdAt"])
-    .index("by_conversation", ["conversationId"]),
+    .index("by_conversation", ["conversationId"])
+    .index("by_sender_client", ["senderId", "clientMessageId"]),
 
   reactions: defineTable({
     messageId: v.id("messages"),
     userId: v.id("users"),
     emoji: v.string(),
   }).index("by_message", ["messageId"]),
+
+  // Web Push subscriptions, one per device that granted notifications.
+  pushSubscriptions: defineTable({
+    userId: v.id("users"),
+    endpoint: v.string(), // unique push endpoint URL
+    p256dh: v.string(),
+    auth: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_endpoint", ["endpoint"]),
 
   // Ephemeral "user X is typing in conversation Y" presence rows.
   typing: defineTable({

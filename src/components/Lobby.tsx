@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { Edit, Phone } from "lucide-react";
+import { Download, Edit, Phone, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { ContactSheet } from "./ContactSheet";
+import { useInstallPrompt } from "../lib/useInstallPrompt";
 import { relative, preview } from "../lib/format";
 import type { DirectoryEntry } from "../lib/types";
 import type { Id } from "../convex/_generated/dataModel";
@@ -50,7 +51,17 @@ export function Lobby({
     | DirectoryEntry[]
     | undefined;
   const [sheet, setSheet] = useState(false);
+  const install = useInstallPrompt();
   const onlineNow = (lastSeenAt: number) => Date.now() - lastSeenAt < 60_000;
+
+  // Re-render on an interval so relative timestamps ("۵ دقیقه") and the
+  // online dot keep up with the clock instead of freezing until the next
+  // Convex update.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   return (
     <div className="paper relative flex h-full flex-col bg-dusk-50">
@@ -70,6 +81,35 @@ export function Lobby({
         </div>
       </header>
 
+      {/* In-app install offer: on Xiaomi/MIUI Chrome the native prompt is
+          buried in the browser menu — this button triggers it directly. */}
+      {install.canInstall && (
+        <div className="mx-5 mb-1 flex items-center gap-3 rounded-2xl border border-ember-200 bg-ember-50/80 px-4 py-3 shadow-sm">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ember-500 text-white">
+            <Download size={17} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-bold text-dusk-900">گرما را نصب کن</p>
+            <p className="truncate text-xs text-dusk-500">آیکون صفحه اصلی، مثل یک اپ واقعی</p>
+          </div>
+          <button
+            type="button"
+            onClick={install.promptInstall}
+            className="shrink-0 rounded-full bg-ember-500 px-4 py-2 text-xs font-extrabold text-white shadow transition hover:bg-ember-600 active:scale-95"
+          >
+            نصب
+          </button>
+          <button
+            type="button"
+            onClick={install.dismiss}
+            aria-label="بستن"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-dusk-400 transition hover:bg-dusk-100"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-3 pb-28 scrollbar-thin">
         {!conversations ? (
           <LobbySkeleton />
@@ -87,10 +127,18 @@ export function Lobby({
               const online = other ? onlineNow(other.user.lastSeenAt) : false;
               const otherId = other?.user._id ?? "";
               return (
-                <button
+                <div
                   key={row._id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onOpen(row._id, name, color, otherId)}
-                  className="group flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-start transition active:bg-dusk-100/60"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onOpen(row._id, name, color, otherId);
+                    }
+                  }}
+                  className="group flex w-full cursor-pointer items-center gap-3 rounded-2xl px-3 py-3 text-start transition active:bg-dusk-100/60"
                 >
                   <Avatar name={name} color={color} size={52} online={online} />
                   <div className="min-w-0 flex-1">
@@ -109,22 +157,23 @@ export function Lobby({
                             : "گفتگو را شروع کن"}
                       </p>
                       {otherId && (
-                        <span
-                          role="button"
-                          tabIndex={0}
+                        <button
+                          type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             onCall(row._id, otherId, name, color);
                           }}
-                          className="hidden h-8 w-8 shrink-0 place-items-center rounded-full bg-ember-100 text-ember-600 transition group-hover:grid hover:bg-ember-200"
-                          aria-label="تماس صوتی"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-ember-100 text-ember-600 transition hover:bg-ember-200 active:scale-90"
+                          aria-label="تماس تصویری"
+                          title="تماس تصویری"
                         >
                           <Phone size={15} />
-                        </span>
+                        </button>
                       )}
                     </div>
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>

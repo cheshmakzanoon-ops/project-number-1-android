@@ -172,6 +172,7 @@ export type DataModel = {
   messages: {
     document: {
       body: string;
+      clientMessageId?: string;
       conversationId: Id<"conversations">;
       createdAt: number;
       deletedAt?: number;
@@ -184,6 +185,7 @@ export type DataModel = {
       | "_creationTime"
       | "_id"
       | "body"
+      | "clientMessageId"
       | "conversationId"
       | "createdAt"
       | "deletedAt"
@@ -194,6 +196,34 @@ export type DataModel = {
       by_creation_time: ["_creationTime"];
       by_conversation: ["conversationId", "_creationTime"];
       by_conversation_created: ["conversationId", "createdAt", "_creationTime"];
+      by_sender_client: ["senderId", "clientMessageId", "_creationTime"];
+    };
+    searchIndexes: {};
+    vectorIndexes: {};
+  };
+  pushSubscriptions: {
+    document: {
+      auth: string;
+      createdAt: number;
+      endpoint: string;
+      p256dh: string;
+      userId: Id<"users">;
+      _id: Id<"pushSubscriptions">;
+      _creationTime: number;
+    };
+    fieldPaths:
+      | "_creationTime"
+      | "_id"
+      | "auth"
+      | "createdAt"
+      | "endpoint"
+      | "p256dh"
+      | "userId";
+    indexes: {
+      by_id: ["_id"];
+      by_creation_time: ["_creationTime"];
+      by_endpoint: ["endpoint", "_creationTime"];
+      by_user: ["userId", "_creationTime"];
     };
     searchIndexes: {};
     vectorIndexes: {};

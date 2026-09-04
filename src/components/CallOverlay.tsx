@@ -45,6 +45,7 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
   const active = phase === "active";
   const containerRef = useRef<HTMLDivElement>(null);
   const [fs, setFs] = useState(false);
+  const busy = kit.busy;
 
   useEffect(() => {
     const onFullscreen = () => setFs(Boolean(document.fullscreenElement));
@@ -105,8 +106,33 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
         }}
       />
 
-      {/* remote audio for audio-only calls (video calls play audio through the main tile) */}
-      {kit.remote && active && !showVideo && <MediaFeed stream={kit.remote} kind="audio" muted={false} className="hidden" />}
+      {/* NOTE: remote mic audio plays through exactly ONE element (the audio
+          element useCallkit attaches on TrackSubscribed). The video tiles
+          below are muted on purpose — playing the mic track through them too
+          caused doubled, phasey audio on every call. */}
+      {kit.reconnecting && active && (
+        <div className="absolute inset-x-0 top-14 z-30 flex justify-center">
+          <span className="animate-pulse rounded-full border border-amber-300/30 bg-amber-500/20 px-4 py-1.5 text-xs font-bold text-amber-200 backdrop-blur">
+            اتصال ضعیف است — در حال بازیابی…
+          </span>
+        </div>
+      )}
+
+      {/* LiveKit measured the OTHER side's link to us as poor — their picture
+          will be blurry/low-fps. Name the cause instead of leaving the caller
+          to blame their own phone. Only shown while their video is actually
+          flowing (camera on / screen shared). */}
+      {kit.remotePoor &&
+        active &&
+        showVideo &&
+        !kit.reconnecting &&
+        (kit.remoteCamOn || Boolean(kit.screenRemote)) && (
+        <div className="absolute inset-x-0 top-24 z-30 flex justify-center px-4">
+          <span className="rounded-full border border-amber-300/30 bg-amber-500/15 px-4 py-1.5 text-center text-xs font-bold text-amber-200/90 backdrop-blur">
+            اینترنت {session.otherName} ضعیف است — تصویر او با کیفیت پایین می‌آید
+          </span>
+        </div>
+      )}
 
       {/* -------- INCOMING / OUTGOING (pre-connect) -------- */}
       {!active && (
@@ -125,22 +151,26 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
           </div>
           <h2 className="mt-7 text-3xl font-black drop-shadow-sm">{session.otherName}</h2>
           <p className="mt-3 text-lg text-white/70">
-            {incoming ? (kind === "video" ? "می‌خواهد با تو گفتگو کند" : "می‌خواهد با تو حرف بزند") : "در حال برقراری…"}
+            {incoming
+              ? kind === "video"
+                ? "می‌خواهد با تو گفتگو کند"
+                : "می‌خواهد با تو حرف بزند"
+              : "در حال زنگ زدن…"}
           </p>
           <p className="mt-1 text-sm tabular-nums text-white/40">{FORMAT_TIME(elapsed)}</p>
 
           <div className="mt-14 flex items-center gap-10">
             {incoming ? (
               <>
-                <ColAction label="رد کردن" tone="rose" onClick={kit.decline}>
+                <ColAction label="رد کردن" tone="rose" onClick={kit.decline} disabled={busy}>
                   <PhoneOff size={26} style={{ transform: "scaleX(-1)" }} />
                 </ColAction>
-                <ColAction label="پاسخ" tone="sage" onClick={kit.accept}>
+                <ColAction label={busy ? "در حال اتصال…" : "پاسخ"} tone="sage" onClick={kit.accept} disabled={busy}>
                   <Phone size={28} style={{ transform: "scaleX(-1)" }} />
                 </ColAction>
               </>
             ) : (
-              <ColAction label="قطع کردن" tone="rose" onClick={kit.hangup}>
+              <ColAction label={busy ? "در حال قطع…" : "قطع کردن"} tone="rose" onClick={kit.hangup} disabled={busy}>
                 <PhoneOff size={26} style={{ transform: "scaleX(-1)" }} />
               </ColAction>
             )}
@@ -158,7 +188,7 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
                 <MediaFeed
                   stream={kit.screenRemote}
                   kind="video"
-                  muted={false}
+                  muted
                   className="absolute inset-0 h-full w-full bg-dusk-900 object-contain"
                 />
                 <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 text-sm">
@@ -171,7 +201,7 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
               <MediaFeed
                 stream={kit.remote}
                 kind="video"
-                muted={false}
+                muted
                 className="absolute inset-0 h-full w-full bg-dusk-900 object-cover"
               />
             ) : (
@@ -203,6 +233,18 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
                   <span className="tabular-nums opacity-70">{FORMAT_TIME(elapsed)}</span>
                 </div>
                 <div className="flex items-center gap-1.5">
+                  {kit.camQuality && kit.camOn && (
+                    <button
+                      type="button"
+                      onClick={kit.cycleQuality}
+                      title="کیفیت تصویر دوربین تو — برای تغییر ضربه بزن (خودکار، ۴۸۰، ۷۲۰، ۱۰۸۰)"
+                      aria-label="تغییر کیفیت دوربین"
+                      className="flex cursor-pointer items-center gap-1.5 rounded-full border border-white/10 bg-dusk-950/60 px-2.5 py-1 text-[11px] font-bold tracking-wide text-sage-300 backdrop-blur transition hover:border-sage-400/40 hover:text-sage-200 active:scale-95"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-sage-400" />
+                      {fa(kit.camQuality)}
+                    </button>
+                  )}
                   {!kit.remoteMicOn && <Badge icon={<MicOff size={13} />} />}
                   {!kit.remoteCamOn && <Badge icon={<CameraOff size={13} />} />}
                 </div>
@@ -297,8 +339,11 @@ export function CallOverlay({ kit, onMinimize }: { kit: GarmaCallkit; onMinimize
             </div>
             <button
               onClick={kit.hangup}
+              disabled={busy}
               aria-label="پایان تماس"
-              className="grid h-18 w-18 shrink-0 place-items-center rounded-full bg-rose-500 text-white shadow-lg shadow-rose-500/40 transition hover:bg-rose-600 active:scale-90"
+              className={`grid shrink-0 place-items-center rounded-full text-white shadow-lg shadow-rose-500/40 transition ${
+                busy ? "cursor-wait opacity-60" : "bg-rose-500 hover:bg-rose-600 active:scale-90"
+              }`}
               style={{ width: 68, height: 68 }}
             >
               <PhoneOff size={27} style={{ transform: "scaleX(-1)" }} />
@@ -382,18 +427,25 @@ function ColAction({
   tone,
   onClick,
   children,
+  disabled = false,
 }: {
   label: string;
   tone: "rose" | "sage";
   onClick: () => void;
   children: ReactNode;
+  disabled?: boolean;
 }) {
   const bg = tone === "rose" ? "bg-rose-500 shadow-rose-500/40 hover:bg-rose-600" : "bg-sage-500 shadow-sage-500/40 hover:bg-sage-600";
   return (
     <div className="flex flex-col items-center gap-2.5">
       <button
         onClick={onClick}
-        className={`grid h-20 w-20 place-items-center rounded-full text-white shadow-lg transition hover:scale-105 active:scale-95 ${bg}`}
+        disabled={disabled}
+        className={`grid h-20 w-20 place-items-center rounded-full text-white shadow-lg transition ${
+          disabled
+            ? "cursor-wait opacity-60"
+            : `hover:scale-105 active:scale-95 ${bg}`
+        }`}
         aria-label={label}
       >
         {children}

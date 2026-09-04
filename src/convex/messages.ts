@@ -76,7 +76,14 @@ export const list = query({
 });
 
 export const send = mutation({
-  args: { conversationId: v.id("conversations"), body: v.string(), token: v.string() },
+  args: {
+    conversationId: v.id("conversations"),
+    body: v.string(),
+    token: v.string(),
+    // Optional; the client sends it when retrying a message that failed on a
+    // flaky connection so the server can recognize (and skip) a duplicate.
+    clientMessageId: v.optional(v.string()),
+  },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
@@ -90,12 +97,25 @@ export const send = mutation({
       .first();
     if (!membership) throw new Error("not_member");
 
+    // Dedupe: the same logical message (same client id) can be re-sent by an
+    // automatic outbox retry after the first attempt's response was lost.
+    if (args.clientMessageId) {
+      const dup = await ctx.db
+        .query("messages")
+        .withIndex("by_sender_client", (q) =>
+          q.eq("senderId", me).eq("clientMessageId", args.clientMessageId),
+        )
+        .first();
+      if (dup) return dup._id;
+    }
+
     const now = Date.now();
     const messageId = await ctx.db.insert("messages", {
       conversationId: args.conversationId,
       senderId: me,
       body: text.slice(0, 4000),
       createdAt: now,
+      clientMessageId: args.clientMessageId,
     });
     await ctx.db.patch(args.conversationId, { lastMessageAt: now });
     // update my read cursor so own messages don't show as unread
