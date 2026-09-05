@@ -128,6 +128,36 @@ export function CallOverlay({
     return () => window.clearTimeout(t);
   }, [kit.shareError, kit]);
 
+  // Auto-dismiss the camera error toast after a few seconds.
+  const [showCamErr, setShowCamErr] = useState(false);
+  useEffect(() => {
+    if (!kit.camError) {
+      setShowCamErr(false);
+      return;
+    }
+    setShowCamErr(true);
+    const t = window.setTimeout(() => {
+      setShowCamErr(false);
+      kit.clearCamError();
+    }, 5000);
+    return () => window.clearTimeout(t);
+  }, [kit.camError, kit]);
+
+  // Auto-dismiss the mic failure toast after a few seconds.
+  const [showMicErr, setShowMicErr] = useState(false);
+  useEffect(() => {
+    if (!kit.micError) {
+      setShowMicErr(false);
+      return;
+    }
+    setShowMicErr(true);
+    const t = window.setTimeout(() => {
+      setShowMicErr(false);
+      kit.clearMicError();
+    }, 6000);
+    return () => window.clearTimeout(t);
+  }, [kit.micError, kit]);
+
   const toggleFullscreen = () => {
     const el = containerRef.current;
     if (!el) return;
@@ -175,6 +205,30 @@ export function CallOverlay({
               !
             </span>
             {kit.shareError}
+          </span>
+        </div>
+      )}
+
+      {/* camera failure toast */}
+      {showCamErr && kit.camError && (
+        <div className="absolute inset-x-0 top-40 z-40 flex justify-center px-4">
+          <span className="animate-rise flex items-center gap-2 rounded-full border border-rose-400/30 bg-rose-500/25 px-4 py-2 text-xs font-bold text-rose-100 backdrop-blur">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-rose-500 text-[10px] font-black text-white">
+              !
+            </span>
+            {kit.camError}
+          </span>
+        </div>
+      )}
+
+      {/* mic failure toast */}
+      {showMicErr && kit.micError && (
+        <div className="absolute inset-x-0 top-60 z-40 flex justify-center px-4">
+          <span className="animate-rise flex items-center gap-2 rounded-full border border-rose-400/30 bg-rose-500/25 px-4 py-2 text-xs font-bold text-rose-100 backdrop-blur">
+            <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-rose-500 text-[10px] font-black text-white">
+              !
+            </span>
+            {kit.micError}
           </span>
         </div>
       )}
@@ -280,9 +334,11 @@ export function CallOverlay({
               <CtrlBtn on={kit.camOn} onClick={kit.toggleCam} label={kit.camOn ? "خاموش" : "دوربین"}>
                 {kit.camOn ? <Camera size={22} /> : <CameraOff size={22} />}
               </CtrlBtn>
-              <CtrlBtn label="تعویض دوربین" onClick={kit.switchCamera}>
-                <FlipHorizontal size={22} />
-              </CtrlBtn>
+              {kit.canSwitchCamera && (
+                <CtrlBtn label="تعویض دوربین" onClick={kit.switchCamera}>
+                  <FlipHorizontal size={22} />
+                </CtrlBtn>
+              )}
               <CtrlBtn
                 on={kit.sharing}
                 spin={kit.shareStarting}

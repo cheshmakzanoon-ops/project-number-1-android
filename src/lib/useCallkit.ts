@@ -77,6 +77,14 @@ export interface GarmaCallkit {
   /** Human-readable (Persian) screen-share failure, if the last attempt failed. */
   shareError: string | null;
   clearShareError: () => void;
+  /** Human-readable (Persian) camera toggle/switch failure, if the last attempt failed. */
+  camError: string | null;
+  clearCamError: () => void;
+  /** Human-readable (Persian) microphone failure, if the last attempt failed. */
+  micError: string | null;
+  clearMicError: () => void;
+  /** True when this device actually lists a second camera to flip to. */
+  canSwitchCamera: boolean;
   local: MediaStream | null;
   screenLocal: MediaStream | null;
   /** Live remote participants (in the media room, tracks flowing or muted). */
@@ -158,6 +166,40 @@ function callerOf(call: CallRow): { userId: Id<"users">; displayName: string; th
  * - "unauthorized" / "livekit_not_configured": permanent — give up.
  */
 type ConnectResult = true | "retryable" | "unauthorized" | "livekit_not_configured";
+
+/**
+ * True when the app runs inside an embedded frame (the Freebuff preview
+ * pane, another site, a WebView wrapper). Browsers withhold camera, mic and
+ * screen capture from cross-origin iframes unless the EMBEDDING page grants
+ * them via `<iframe allow="camera; microphone; display-capture">` — the app
+ * itself cannot override that. This is the usual reason a call "connects but
+ * no media ever starts" inside a preview.
+ */
+const IS_EMBEDDED = (() => {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true; // reading top is blocked ⇒ cross-origin frame ⇒ embedded
+  }
+})();
+
+/** iPhone / iPad (UA + iPadOS≥13 which masquerades as a Mac). */
+const IS_IOS =
+  /iP(hone|ad|od)/i.test(navigator.userAgent) ||
+  (/Macintosh/i.test(navigator.userAgent) &&
+    typeof navigator.maxTouchPoints === "number" &&
+    navigator.maxTouchPoints > 1);
+
+/** A human-readable Persian explanation for a failed camera start. */
+function camFailureMessage(denied: boolean): string {
+  if (IS_EMBEDDED) {
+    return "دوربین و میکروفون در این نمای جاسازی‌شده قفل هستند؛ لینک اپ را مستقیم در مرورگر گوشی باز کن (یا اپ را «نصب» کن) تا اجازهٔ دوربین داده شود.";
+  }
+  if (denied) {
+    return "اجازهٔ دوربین داده نشده است؛ در مرورگر روی آیکون قفل بزن و دسترسی دوربین را فعال کن، بعد دوباره دکمهٔ دوربین را بزن.";
+  }
+  return "دوربین روشن نشد؛ دوباره روی دکمهٔ دوربین بزن تا دوباره تلاش کند.";
+}
 
 function one(media: MediaStreamTrack | null | undefined): MediaStream | null {
   return media ? new MediaStream([media]) : null;
@@ -304,6 +346,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const [sharing, setSharing] = useState(false);
   const [shareStarting, setShareStarting] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
+  const [camError, setCamError] = useState<string | null>(null);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [camCount, setCamCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -342,6 +387,29 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const partsRef = useRef<Map<string, Part>>(new Map());
   const [partsTick, setPartsTick] = useState(0);
   const commitParts = useCallback(() => setPartsTick((t) => t + 1), []);
+
+  // ---- Camera availability (drives the switch-camera button) -----------
+  // The flip control is only useful when the device has ≥2 cameras. Count
+  // them while a video session is up and keep the count live on device
+  // changes (USB webcams, phone cameras appearing after permission).
+  const videoSessionActive = session?.kind === "video";
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!videoSessionActive || !md?.enumerateDevices) {
+      setCamCount(0);
+      return;
+    }
+    const refresh = () => {
+      md.enumerateDevices()
+        .then((devices) =>
+          setCamCount(devices.filter((d) => d.kind === "videoinput" && d.deviceId).length),
+        )
+        .catch(() => {});
+    };
+    refresh();
+    md.addEventListener?.("devicechange", refresh);
+    return () => md.removeEventListener?.("devicechange", refresh);
+  }, [videoSessionActive]);
 
   const partOf = useCallback((userId: string): Part => {
     let p = partsRef.current.get(userId);
@@ -408,6 +476,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const tierBusyRef = useRef(false);
   const camIntentRef = useRef(false);
   const micIntentRef = useRef(true);
+  /** Permission for mic/camera was refused (or is blocked by the embedding
+   *  page), so a later silent LiveKit capture failure can be explained. */
+  const mediaDeniedRef = useRef(false);
   /** Whether THIS device is currently sharing its screen. */
   const sharingRef = useRef(false);
   const speakerOnRef = useRef(true);
@@ -441,6 +512,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const notifyIncoming = useAction(api.push.notifyIncomingCall);
 
   const clearShareError = useCallback(() => setShareError(null), []);
+  const clearCamError = useCallback(() => setCamError(null), []);
+  const clearMicError = useCallback(() => setMicError(null), []);
 
   // Auto-dismiss call errors after a few seconds so a stale toast never
   // blocks the buttons underneath it.
@@ -459,15 +532,24 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const primeMedia = useCallback(async (kind: CallKind) => {
     void loadLiveKit().catch(() => {});
     try {
-      if (!navigator.mediaDevices?.getUserMedia) return;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        mediaDeniedRef.current = true;
+        return;
+      }
       const stream = await withTimeout(
         navigator.mediaDevices.getUserMedia({ audio: true, video: kind === "video" }),
         10_000,
         "prime_timeout",
       );
       stream.getTracks().forEach((t) => t.stop());
-    } catch {
-      /* denied here just means the grant is reused; LiveKit will surface errors */
+    } catch (e) {
+      // Remember a refusal (user denied, or the embedding page withholds the
+      // permission) so connectMedia can explain a silent capture failure
+      // instead of leaving the call looking connected with no media.
+      const name = e instanceof Error ? e.name : "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        mediaDeniedRef.current = true;
+      }
     }
   }, []);
 
@@ -534,6 +616,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setShareStarting(false);
     setCamQuality(null);
     setReconnecting(false);
+    setCamError(null);
+    setMicError(null);
+    mediaDeniedRef.current = false;
     qualityCountsRef.current = { poor: 0, good: 0 };
     setError(null);
     setSession(null);
@@ -634,13 +719,52 @@ export function useCallkit(token: string | null): GarmaCallkit {
       }
       tierBusyRef.current = true;
       try {
-        const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-        if (pub) await room.localParticipant.setCameraEnabled(false);
-        await room.localParticipant.setCameraEnabled(
-          true,
-          { resolution: plan.resolution, frameRate: plan.frameRate },
-          { videoEncoding: plan.encoding, simulcast: true },
-        );
+        const existing = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        // A live publication can only change camera/constraints via a fresh
+        // capture: setCameraEnabled(true) on an existing publication just
+        // soft-unmutes the SAME track and silently ignores the new options.
+        // Unpublish it first so the publish below is a real getUserMedia —
+        // the exact path that works at call connect — on the currently
+        // selected device.
+        if (existing?.track) {
+          try {
+            await room.localParticipant.unpublishTrack(existing.track);
+          } catch {
+            /* the fresh publish below will fail visibly if the camera stuck */
+          }
+        }
+        // Bound the capture: a getUserMedia/publish that hangs (some Android
+        // Chrome builds) must never wedge the camera controls forever.
+        const attempt = (deviceId?: string) =>
+          withTimeout(
+            room.localParticipant.setCameraEnabled(
+              true,
+              {
+                deviceId: deviceId ? { exact: deviceId } : undefined,
+                resolution: plan.resolution,
+                frameRate: plan.frameRate,
+              },
+              { videoEncoding: plan.encoding, simulcast: true },
+            ),
+            15_000,
+            "cam_capture_timeout",
+          );
+        try {
+          await attempt(lastCamIdRef.current || undefined);
+        } catch (err) {
+          // A stale/over-constrained device id (permissions were reset, the
+          // device was unplugged…) must never black out the call: fall back
+          // to whatever camera the browser can actually open.
+          if (!lastCamIdRef.current) throw err;
+          lastCamIdRef.current = "";
+          await attempt();
+        }
+        // Remember which physical camera is actually live so a later
+        // re-capture (unmute, tier change) never silently reverts to the
+        // browser's default device.
+        const repub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        const realId = repub?.track?.mediaStreamTrack?.getSettings().deviceId;
+        if (realId) lastCamIdRef.current = realId;
         captureTierRef.current = tier;
         setCamQuality(plan.label);
         return true;
@@ -953,14 +1077,58 @@ export function useCallkit(token: string | null): GarmaCallkit {
         const enableMic = restore ? micIntentRef.current : true;
         const enableCam = restore ? camIntentRef.current : kind === "video";
         if (enableMic) micIntentRef.current = true;
+
+        const camPub = () => r.localParticipant.getTrackPublication(Track.Source.Camera);
+        const camLive = () => {
+          const p = camPub();
+          return !!p?.track && !p.isMuted && p.track.mediaStreamTrack.readyState === "live";
+        };
+        const micPub = () => r.localParticipant.getTrackPublication(Track.Source.Microphone);
+        const micLive = () => {
+          const p = micPub();
+          return !!p?.track && !p.isMuted;
+        };
+        const pause = (ms: number) => new Promise<void>((res) => window.setTimeout(res, ms));
+
         await Promise.allSettled([
-          kind === "video" && enableCam
+          enableCam
             ? captureCameraAt(startTier, { enable: true })
             : kind === "video" && restore
               ? r.localParticipant.setCameraEnabled(false)
               : Promise.resolve(),
           r.localParticipant.setMicrophoneEnabled(enableMic),
         ]);
+        // Verify each source ACTUALLY came up and give it one automatic
+        // retry — camera hardware on some Androids answers slowly or the
+        // first capture trips a transient error. A silent capture failure
+        // must never leave the call "connected" with no video/audio and no
+        // explanation.
+        if (enableMic && !micLive()) {
+          await pause(700);
+          if (!micLive()) await r.localParticipant.setMicrophoneEnabled(true).catch(() => {});
+        }
+        if (enableCam && !camLive()) {
+          await pause(700);
+          if (!camLive()) await captureCameraAt(startTier, { enable: true });
+        }
+        setCamError(null);
+        setMicError(null);
+        if (enableCam && !camLive()) {
+          camIntentRef.current = false;
+          setCamOn(false);
+          setCamError(camFailureMessage(mediaDeniedRef.current));
+        }
+        if (enableMic && !micLive()) {
+          micIntentRef.current = false;
+          setMicOn(false);
+          setMicError(
+            IS_EMBEDDED
+              ? "میکروفون در این نمای جاسازی‌شده قفل است؛ لینک اپ را مستقیم در مرورگر گوشی باز کن."
+              : mediaDeniedRef.current
+                ? "اجازهٔ میکروفون داده نشده است؛ در مرورگر روی آیکون قفل بزن و دسترسی میکروفون را فعال کن."
+                : "میکروفون وصل نشد؛ دوباره تلاش کن یا میکروفون دستگاه را بررسی کن.",
+          );
+        }
 
         // Measured-quality sampler: in auto mode, 2 consecutive poor samples
         // (~10s) step the camera down a tier; 6 good ones step back up.
@@ -1127,7 +1295,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
           row.status === "active" &&
           cur.phase === "incoming" &&
           !cur.initiatedByMe &&
-          !cur.joinOffer
+          !cur.joinOffer &&
+          // While an accept is in flight (busy is held from the tap until the
+          // media connect settles), the row turning active is MY OWN answer —
+          // not a group-mate answering for me. Don't demote my ring to a
+          // quiet join offer; accept() flips this screen to active itself.
+          !busyRef.current
         ) {
           // Someone else answered the group call I was still ringing for:
           // stop ringing and offer a quiet join instead.
@@ -1362,9 +1535,25 @@ export function useCallkit(token: string | null): GarmaCallkit {
       } catch {
         /* noop */
       }
+      // The session can move on while the media connect runs: as soon as the
+      // call row flips to "active" (this very answer committing), the myCalls
+      // effect refreshes this session — marking the caller/others as joined.
+      // Painting the tap-time snapshot `s` over that fresh state would rebuild
+      // the active overlay from a stale peer list (the other side still
+      // "unjoined"), leaving the person who just answered on the
+      // "در انتظار پیوستن بقیه…" wait screen — no remote video, no self
+      // preview — for the rest of the call. Activate by merging into the
+      // freshest session instead, and if the session is gone or belongs to
+      // another call by now (hung up / moved on), don't resurrect it.
+      const activate = () =>
+        setSession((prev) =>
+          prev && prev.callId === s.callId
+            ? { ...prev, phase: "active", joinOffer: false }
+            : prev,
+        );
       const res = await connectMedia(s.callId, s.kind);
       if (res === true) {
-        setSession({ ...s, phase: "active", joinOffer: false });
+        activate();
       } else if (res === "unauthorized" || res === "livekit_not_configured") {
         setError(res);
         try {
@@ -1374,7 +1563,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
         }
         cleanup();
       } else {
-        setSession({ ...s, phase: "active", joinOffer: false });
+        activate();
         setReconnecting(true);
         scheduleConnectRetry(s.callId, s.kind);
       }
@@ -1455,16 +1644,25 @@ export function useCallkit(token: string | null): GarmaCallkit {
 
   const toggleCam = useCallback(async () => {
     const room = roomRef.current;
-    if (!room) return;
+    if (!room || tierBusyRef.current) return;
     const next = !camOn;
+    setCamError(null);
     if (!next) {
+      // Soft-mute (keeps the camera warm for an instant re-enable, same as
+      // the mic toggle). Remote participants get TrackMuted and show the
+      // camera-off state.
       camIntentRef.current = false;
       try {
-        await room.localParticipant.setCameraEnabled(false);
+        await withTimeout(
+          room.localParticipant.setCameraEnabled(false),
+          10_000,
+          "cam_mute_timeout",
+        );
+        setCamOn(false);
       } catch {
-        /* noop */
+        camIntentRef.current = true;
+        setCamError("خاموش کردن دوربین ممکن نشد؛ دوباره تلاش کن");
       }
-      setCamOn(false);
       return;
     }
     camIntentRef.current = true;
@@ -1472,24 +1670,47 @@ export function useCallkit(token: string | null): GarmaCallkit {
       setCamOn(true);
     } else {
       camIntentRef.current = false;
+      setCamError(camFailureMessage(mediaDeniedRef.current));
     }
   }, [camOn, captureCameraAt, desiredTier]);
 
   const switchCamera = useCallback(async () => {
     const room = roomRef.current;
-    if (!room) return;
+    if (!room || tierBusyRef.current) return;
+    const { Track } = livekit();
+    let cams: MediaDeviceInfo[] = [];
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const cams = devices.filter((d) => d.kind === "videoinput");
-      if (cams.length < 2) return;
-      const idx = cams.findIndex((d) => d.deviceId === lastCamIdRef.current);
-      const next = cams[(idx + 1) % cams.length];
-      lastCamIdRef.current = next.deviceId;
-      await room.switchActiveDevice("videoinput" as MediaDeviceKind, next.deviceId);
+      cams = (await navigator.mediaDevices.enumerateDevices()).filter(
+        (d) => d.kind === "videoinput" && d.deviceId,
+      );
     } catch {
-      /* noop */
+      return;
     }
-  }, []);
+    setCamCount(cams.length);
+    // No second camera → nothing to switch to. (The UI hides the button in
+    // this case; a stray tap here is just a race with devicechange.)
+    if (cams.length < 2) return;
+    // Which camera is actually live right now (track settings beat our
+    // bookkeeping — the browser reports the real device).
+    const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+    const currentId = pub?.track?.mediaStreamTrack?.getSettings().deviceId ?? lastCamIdRef.current;
+    const idx = cams.findIndex((d) => d.deviceId === currentId);
+    const next = idx >= 0 ? cams[(idx + 1) % cams.length] : cams[0];
+    if (!next || !next.deviceId || next.deviceId === currentId) return;
+    const previous = lastCamIdRef.current;
+    lastCamIdRef.current = next.deviceId;
+    setCamError(null);
+    if (camIntentRef.current) {
+      // Re-capture on the target device through the hard-publish path
+      // (LiveKit's own switchActiveDevice restarts the SAME track, which is
+      // unreliable on Android Chrome).
+      const ok = await captureCameraAt(captureTierRef.current, { enable: true });
+      if (!ok) {
+        lastCamIdRef.current = previous;
+        setCamError("تعویض دوربین ممکن نشد؛ دوباره تلاش کن");
+      }
+    }
+  }, [captureCameraAt]);
 
   /**
    * Screen share — hardened:
@@ -1503,29 +1724,50 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const toggleShare = useCallback(async () => {
     const room = roomRef.current;
     if (!room || shareBusyRef.current) return;
+    const next = !sharingRef.current;
+    // Some Android WebViews expose getDisplayMedia but never open a picker
+    // (or the platform simply has no screen-capture API) — answer with a
+    // clear message instead of a silent no-op.
+    if (next && typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
+      setShareError(
+        IS_IOS
+          ? "سافاری آیفون و آی‌پد اجازه نمی‌دهد وب‌سایت صفحهٔ گوشی را بفرستد؛ برای اشتراک صفحه از گوشی اندروید یا کامپیوتر استفاده کن."
+          : IS_EMBEDDED
+            ? "اشتراک صفحه در این نمای جاسازی‌شده قفل است؛ لینک اپ را مستقیم در مرورگر باز کن."
+            : "اشتراک صفحه در این مرورگر پشتیبانی نمی‌شود؛ کروم یا فایرفاکس را امتحان کن.",
+      );
+      return;
+    }
+    if (next && IS_EMBEDDED) {
+      setShareError("اشتراک صفحه در این نمای جاسازی‌شده قفل است؛ لینک اپ را مستقیم در مرورگر باز کن.");
+      return;
+    }
     shareBusyRef.current = true;
     try {
-      const next = !sharingRef.current;
       setShareError(null);
       if (next) setShareStarting(true);
       try {
-        const pub = await room.localParticipant.setScreenShareEnabled(
-          next,
-          {
-            // No resolution request on purpose: on Safari 17 specifying a
-            // resolution makes getDisplayMedia capture far below it.
-            audio: false,
-            selfBrowserSurface: "include",
-            surfaceSwitching: "include",
-          },
-          {
-            // Screen sharing is the hungriest thing on the link; publishing
-            // it uncapped could starve voice/video on a weak uplink. Single
-            // layer (simulcast off) keeps the SFU cost low for 2–3 viewers.
-            simulcast: false,
-            screenShareEncoding: { maxBitrate: 2_000_000, maxFramerate: 15 },
-          },
-        );
+        const capture = () =>
+          room.localParticipant.setScreenShareEnabled(
+            next,
+            {
+              // No resolution request on purpose: on Safari 17 specifying a
+              // resolution makes getDisplayMedia capture far below it.
+              audio: false,
+              selfBrowserSurface: "include",
+              surfaceSwitching: "include",
+            },
+            {
+              // Screen sharing is the hungriest thing on the link; publishing
+              // it uncapped could starve voice/video on a weak uplink. Single
+              // layer (simulcast off) keeps the SFU cost low for 2–3 viewers.
+              simulcast: false,
+              screenShareEncoding: { maxBitrate: 2_000_000, maxFramerate: 15 },
+            },
+          );
+        // Bound the picker wait so the button always answers the user instead
+        // of dying silently when the browser never shows/returns a picker.
+        const pub = next ? await withTimeout(capture(), 20_000, "share_timeout") : await capture();
         if (next && !pub && !sharingRef.current) {
           setShareError("اشتراک صفحه شروع نشد؛ دوباره تلاش کن");
         }
@@ -1536,9 +1778,19 @@ export function useCallkit(token: string | null): GarmaCallkit {
           const name = e instanceof DOMException ? e.name : "";
           const msg = e instanceof Error ? e.message : "";
           setShareError(
-            name === "NotAllowedError" || /permission|cancel/i.test(msg)
-              ? "برای اشتراک صفحه باید اجازه بدهی"
-              : "اشتراک صفحه ممکن نشد؛ دوباره تلاش کن",
+            msg === "share_timeout"
+              ? IS_EMBEDDED
+                ? "پنجرهٔ انتخاب صفحه باز نشد — این نمای جاسازی‌شده اجازهٔ اشتراک صفحه نمی‌دهد؛ اپ را مستقیم در مرورگر باز کن."
+                : /Android/i.test(navigator.userAgent)
+                  ? "در پنجرهٔ سیستم «شروع/ضبط» را بزن تا صفحه‌ات فرستاده شود."
+                  : "انتخاب صفحه خیلی طول کشید؛ دوباره تلاش کن"
+              : name === "NotAllowedError" || /permission|cancel/i.test(msg)
+                ? IS_IOS
+                  ? "سافاری آیفون اجازهٔ اشتراک صفحه نمی‌دهد؛ از اندروید یا کامپیوتر استفاده کن."
+                  : /Android/i.test(navigator.userAgent)
+                    ? "در پنجرهٔ سیستم «شروع/ضبط» را بزن تا اجازهٔ اشتراک داده شود."
+                    : "برای اشتراک صفحه باید اجازه بدهی (گزینهٔ مورد نظر را انتخاب و تأیید کن)."
+                : "اشتراک صفحه ممکن نشد؛ دوباره تلاش کن",
           );
         }
         // Keep the UI honest even if LiveKit got confused: if no track is
@@ -1590,6 +1842,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
     shareStarting,
     shareError,
     clearShareError,
+    camError,
+    clearCamError,
+    micError,
+    clearMicError,
+    canSwitchCamera: videoSessionActive && camCount >= 2,
     local,
     screenLocal,
     remotes,
