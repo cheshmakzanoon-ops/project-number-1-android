@@ -281,6 +281,42 @@ export type DataModel = {
     searchIndexes: {};
     vectorIndexes: {};
   };
+  statuses: {
+    document: {
+      body: string;
+      createdAt: number;
+      kind?: "text" | "image";
+      mimeType?: string;
+      storageId?: Id<"_storage">;
+      userId: Id<"users">;
+      viewers?: Array<{
+        displayName: string;
+        themeColor: string;
+        userId: Id<"users">;
+        viewedAt: number;
+      }>;
+      _id: Id<"statuses">;
+      _creationTime: number;
+    };
+    fieldPaths:
+      | "_creationTime"
+      | "_id"
+      | "body"
+      | "createdAt"
+      | "kind"
+      | "mimeType"
+      | "storageId"
+      | "userId"
+      | "viewers";
+    indexes: {
+      by_id: ["_id"];
+      by_creation_time: ["_creationTime"];
+      by_created: ["createdAt", "_creationTime"];
+      by_user: ["userId", "_creationTime"];
+    };
+    searchIndexes: {};
+    vectorIndexes: {};
+  };
   typing: {
     document: {
       conversationId: Id<"conversations">;

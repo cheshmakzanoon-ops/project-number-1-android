@@ -29,6 +29,9 @@ interface ActiveChat {
   peers: ConvPeer[];
 }
 
+/** The lobby's three tabs: chats / status rings / recent calls. */
+type LobbyTab = "chats" | "status" | "calls";
+
 export function App() {
   const token = useMemo(() => getDeviceToken(), []);
   const queryMe = useQuery(api.users.me, token ? { token } : "skip") as unknown as
@@ -51,6 +54,7 @@ export function App() {
   const [authErr, setAuthErr] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
+  const [tab, setTab] = useState<LobbyTab>("chats");
   // "زنگ تماس" (notification) banner — hidden for this session after dismiss.
   const [notifDismissed, setNotifDismissed] = useState(false);
   const callkit = useCallkit(token);
@@ -323,6 +327,8 @@ export function App() {
             token={token}
             meId={identity._id}
             meName={identity.displayName}
+            tab={tab}
+            onTab={setTab}
             onOpen={(cid, kind, name, color, peers) =>
               openConv(cid as Id<"conversations">, kind, name, color, peers)
             }
@@ -369,7 +375,9 @@ export function App() {
             <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-rose-500 text-xs font-black">!</span>
             {callkit.error === "livekit_not_configured"
               ? "تماس هنوز در دسترس نیست — کلیدهای تماس (LiveKit) را تنظیم کن."
-              : "برقراری تماس ممکن نشد. دوباره تلاش کن."}
+              : callkit.error === "already_in_call"
+                ? "الان در یک تماس دیگری هستی. اول همان را تمام کن."
+                : "برقراری تماس ممکن نشد. دوباره تلاش کن."}
           </div>
         </div>
       )}

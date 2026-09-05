@@ -70,6 +70,12 @@ export declare const api: {
       { callId: Id<"calls">; token?: string },
       any
     >;
+    recent: FunctionReference<
+      "query",
+      "public",
+      { limit?: number; token?: string },
+      any
+    >;
     sendSignal: FunctionReference<
       "mutation",
       "public",
@@ -238,6 +244,47 @@ export declare const api: {
       "mutation",
       "public",
       { auth: string; endpoint: string; p256dh: string; token: string },
+      any
+    >;
+  };
+  statuses: {
+    cleanupExpired: FunctionReference<
+      "mutation",
+      "public",
+      { token: string },
+      any
+    >;
+    feed: FunctionReference<"query", "public", { token?: string }, any>;
+    forOwner: FunctionReference<
+      "query",
+      "public",
+      { ownerId: Id<"users">; token?: string },
+      any
+    >;
+    mine: FunctionReference<"query", "public", { token?: string }, any>;
+    post: FunctionReference<
+      "mutation",
+      "public",
+      {
+        body?: string;
+        kind?: "text" | "image";
+        mimeType?: string;
+        storageId?: Id<"_storage">;
+        token: string;
+      },
+      any
+    >;
+    remove: FunctionReference<
+      "mutation",
+      "public",
+      { statusId: Id<"statuses">; token: string },
+      any
+    >;
+    uploadUrl: FunctionReference<"mutation", "public", { token: string }, any>;
+    view: FunctionReference<
+      "mutation",
+      "public",
+      { statusId: Id<"statuses">; token: string },
       any
     >;
   };

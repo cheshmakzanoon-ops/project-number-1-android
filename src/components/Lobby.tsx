@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { Edit, Phone, Users, Video } from "lucide-react";
+import { Edit, MessageCircle, Phone, Users, Video } from "lucide-react";
 import { Avatar } from "./Avatar";
+import { StatusStrip } from "./StatusStrip";
+import { RecentCalls } from "./RecentCalls";
 import { fa, relative, preview } from "../lib/format";
 import type { ConvPeer, DirectoryEntry } from "../lib/types";
 import type { Id } from "../convex/_generated/dataModel";
@@ -29,6 +31,9 @@ type LobbyRow = {
   }>;
 };
 
+/** The lobby's three tabs — chats (default), status rings, recent calls. */
+export type LobbyTab = "chats" | "status" | "calls";
+
 /** Other members of a row as ConvPeer (used to ring a whole conversation). */
 function peersOf(row: LobbyRow, meId: string): ConvPeer[] {
   return row.members
@@ -44,6 +49,8 @@ export function Lobby({
   token,
   meId,
   meName,
+  tab,
+  onTab,
   onOpen,
   onCall,
   onMessageContact,
@@ -54,6 +61,8 @@ export function Lobby({
   token: string;
   meId: Id<"users">;
   meName: string;
+  tab: LobbyTab;
+  onTab: (t: LobbyTab) => void;
   onOpen: (
     convId: string,
     kind: "dm" | "group",
@@ -103,7 +112,7 @@ export function Lobby({
 
   return (
     <div className="paper relative flex h-full flex-col bg-dusk-50">
-      <header className="safe-area px-5 pb-3 pt-2">
+      <header className="safe-area px-5 pb-2 pt-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-3">
             <img
@@ -119,18 +128,40 @@ export function Lobby({
               <p className="text-sm text-dusk-600">سلام {meName} عزیز 🌿</p>
             </div>
           </div>
-          <button
-            onClick={() => setSheet(true)}
-            className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-lg shadow-black/30 transition hover:bg-ember-300 active:scale-95"
-            aria-label="گفتگوی جدید"
-          >
-            <Edit size={19} />
-          </button>
+          {tab === "chats" && (
+            <button
+              onClick={() => setSheet(true)}
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-lg shadow-black/30 transition hover:bg-ember-300 active:scale-95"
+              aria-label="گفتگوی جدید"
+            >
+              <Edit size={19} />
+            </button>
+          )}
+        </div>
+
+        {/* ---- bottom-of-app tabs: گفتگوها / وضعیت‌ها / تماس‌ها ---- */}
+        <div className="mt-3 flex items-center gap-1 rounded-full bg-dusk-200/70 p-1">
+          <TabPill active={tab === "chats"} onClick={() => onTab("chats")}>
+            <MessageCircle size={15} /> گفتگوها
+          </TabPill>
+          <TabPill active={tab === "status"} onClick={() => onTab("status")}>
+            <span className="relative flex items-center gap-1.5">
+              <StatusDotOnline token={token} />
+              وضعیت‌ها
+            </span>
+          </TabPill>
+          <TabPill active={tab === "calls"} onClick={() => onTab("calls")}>
+            <Phone size={15} /> تماس‌ها
+          </TabPill>
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-3 pb-28 scrollbar-thin">
-        {!conversations ? (
+        {tab === "status" ? (
+          <StatusStrip token={token} meId={meId} meName={meName} />
+        ) : tab === "calls" ? (
+          <RecentCalls token={token} />
+        ) : !conversations ? (
           <LobbySkeleton />
         ) : conversations.length === 0 ? (
           <EmptyState
@@ -243,13 +274,15 @@ export function Lobby({
         )}
       </div>
 
-      <button
-        onClick={() => setSheet(true)}
-        className="safe-area fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ember-400 px-6 py-3.5 font-extrabold text-cocoa shadow-xl shadow-black/40 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
-      >
-        <Edit size={19} />
-        گفتگوی جدید
-      </button>
+      {tab === "chats" && (
+        <button
+          onClick={() => setSheet(true)}
+          className="safe-area fixed bottom-6 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ember-400 px-6 py-3.5 font-extrabold text-cocoa shadow-xl shadow-black/40 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
+        >
+          <Edit size={19} />
+          گفتگوی جدید
+        </button>
+      )}
 
       <Suspense fallback={null}>
         <ContactSheet
@@ -302,6 +335,39 @@ function RowCallBtn({
       {children}
     </button>
   );
+}
+
+/** One of the three lobby tabs (گفتگوها / وضعیت‌ها / تماس‌ها). */
+function TabPill({
+  children,
+  active,
+  onClick,
+}: {
+  children: ReactNode;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex flex-1 items-center justify-center gap-1.5 rounded-full px-3 py-2 text-[13px] font-bold transition ${
+        active
+          ? "bg-ember-400 text-cocoa shadow-md shadow-black/30"
+          : "text-dusk-600 hover:text-dusk-800"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Tiny green dot on the وضعیت‌ها tab when someone has a live status. */
+function StatusDotOnline({ token }: { token: string }) {
+  const feed = useQuery(api.statuses.feed, token ? { token } : "skip");
+  const count = Array.isArray(feed) ? feed.length : 0;
+  if (count === 0) return null;
+  return <span className="h-2 w-2 rounded-full bg-sage-400" />;
 }
 
 /** Small stacked avatars for a group conversation row. */

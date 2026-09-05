@@ -247,6 +247,93 @@ export const myCalls = query({
   },
 });
 
+/**
+ * Call history (تماس‌ها): every finished call I took part in, newest first.
+ * Live (ringing/active) calls are deliberately excluded — they surface on
+ * the ringing overlay via `myCalls`. This is also the public function older
+ * clients call as `calls:recent`.
+ *
+ * Row shape (fields the call-history screen reads):
+ *   callId, conversationId, kind, status, initiatedByMe, startedAt, endedAt,
+ *   peers[{userId, displayName, themeColor}],
+ *   convKind ("dm" | "group"), name, color (named group title/accent, else
+ *   "" so the client falls back to peers[0]),
+ *   missed (nobody answered), outgoing (I placed it),
+ *   acceptedByAnyone (anyone ever joined — gates the duration display).
+ */
+export const recent = query({
+  args: { token: v.optional(v.string()), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const me = await userIdFromToken(ctx, args.token);
+    if (!me) return [];
+    const n = Math.min(Math.max(args.limit ?? 60, 1), 200);
+
+    const parts = await ctx.db
+      .query("callParticipants")
+      .withIndex("by_user", (q) => q.eq("userId", me))
+      .collect();
+    const finished: Array<{
+      call: { _id: Id<"calls">; conversationId: Id<"conversations">; kind: "audio" | "video"; status: string; initiatorId: Id<"users">; startedAt: number; endedAt?: number };
+    }> = [];
+    for (const p of parts) {
+      const call = await ctx.db.get(p.callId);
+      if (!call) continue;
+      if (call.status === "ringing" || call.status === "active") continue;
+      finished.push({ call });
+    }
+    finished.sort((a, b) => b.call.startedAt - a.call.startedAt);
+
+    const out: Array<{
+      callId: Id<"calls">;
+      conversationId: Id<"conversations">;
+      kind: "audio" | "video";
+      status: "ended" | "declined" | "missed";
+      initiatedByMe: boolean;
+      startedAt: number;
+      endedAt: number | null;
+      peers: Array<{ userId: Id<"users">; displayName: string; themeColor: string }>;
+      convKind: "dm" | "group";
+      name: string;
+      color: string;
+      missed: boolean;
+      outgoing: boolean;
+      acceptedByAnyone: boolean;
+    }> = [];
+    for (const { call } of finished.slice(0, n)) {
+      const allRows = await ctx.db
+        .query("callParticipants")
+        .withIndex("by_call", (q) => q.eq("callId", call._id))
+        .collect();
+      const peers: Array<{ userId: Id<"users">; displayName: string; themeColor: string }> = [];
+      for (const r of allRows) {
+        if (r.userId === me) continue;
+        const u = await ctx.db.get(r.userId);
+        if (u) peers.push({ userId: u._id, displayName: u.displayName, themeColor: u.themeColor });
+      }
+      const conv = await ctx.db.get(call.conversationId);
+      const isGroup = conv?.kind === "group";
+      const groupName = isGroup ? (conv?.name ?? "") : "";
+      out.push({
+        callId: call._id,
+        conversationId: call.conversationId,
+        kind: call.kind,
+        status: call.status as "ended" | "declined" | "missed",
+        initiatedByMe: call.initiatorId === me,
+        startedAt: call.startedAt,
+        endedAt: call.endedAt ?? null,
+        peers,
+        convKind: conv?.kind ?? "dm",
+        name: groupName,
+        color: "",
+        missed: call.status === "missed",
+        outgoing: call.initiatorId === me,
+        acceptedByAnyone: allRows.some((r) => r.acceptedAt != null),
+      });
+    }
+    return out;
+  },
+});
+
 /** Send a hangup signal to every still-present member except `exceptMe`. */
 async function notifyHangup(
   ctx: { db: MutationCtx["db"] },

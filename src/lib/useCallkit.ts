@@ -441,6 +441,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
 
   const clearShareError = useCallback(() => setShareError(null), []);
 
+  // Auto-dismiss call errors after a few seconds so a stale toast never
+  // blocks the buttons underneath it.
+  useEffect(() => {
+    if (!error) return;
+    const t = window.setTimeout(() => setError(null), 7000);
+    return () => window.clearTimeout(t);
+  }, [error]);
+
   /**
    * iOS/Safari only grant mic/camera if the request happens inside (or very
    * soon after) a user tap, before any slow network round-trips. We warm the
@@ -1269,7 +1277,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
         let callId: Id<"calls">;
         try {
           callId = await startCallMut({ conversationId, token, kind });
-        } catch {
+        } catch (e) {
+          // Never fail silently: the caller's phone must say WHY the call
+          // didn't go through (busy elsewhere vs. server/network trouble).
+          const msg = e instanceof Error ? e.message : "";
+          setError(msg === "already_in_call" ? "already_in_call" : "start_failed");
           return;
         }
         setSession({

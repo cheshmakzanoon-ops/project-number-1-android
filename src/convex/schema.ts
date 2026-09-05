@@ -73,6 +73,31 @@ export default defineSchema({
     emoji: v.string(),
   }).index("by_message", ["messageId"]),
 
+  // Ephemeral 24-hour "status" posts (وضعیت) — WhatsApp-style updates that
+  // vanish a day after posting. Text updates carry a body; image updates carry
+  // a caption plus the bytes in Convex storage, and every row records who has
+  // seen it (the owner's دیده‌شده list). Cleaned up lazily (see statuses.ts).
+  statuses: defineTable({
+    userId: v.id("users"),
+    body: v.string(),
+    createdAt: v.number(),
+    kind: v.optional(v.union(v.literal("text"), v.literal("image"))),
+    storageId: v.optional(v.id("_storage")),
+    mimeType: v.optional(v.string()),
+    viewers: v.optional(
+      v.array(
+        v.object({
+          userId: v.id("users"),
+          displayName: v.string(),
+          themeColor: v.string(),
+          viewedAt: v.number(),
+        }),
+      ),
+    ),
+  })
+    .index("by_user", ["userId"])
+    .index("by_created", ["createdAt"]),
+
   // Web Push subscriptions, one per device that granted notifications.
   pushSubscriptions: defineTable({
     userId: v.id("users"),

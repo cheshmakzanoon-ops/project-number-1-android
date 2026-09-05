@@ -106,10 +106,11 @@ export const heartbeat = mutation({
     // every open device generates.
     if (now - u.lastSeenAt < 15_000) return;
     await ctx.db.patch(userId, { lastSeenAt: now });
-    // Opportunistic server housekeeping (dead rings, abandoned active calls).
-    // Every open client already sends this mutation, so cleanup needs no
-    // scheduler of its own.
+    // Opportunistic server housekeeping (dead rings, abandoned active calls,
+    // expired statuses). Every open client already sends this mutation, so
+    // cleanup needs no scheduler of its own.
     await ctx.runMutation(api.calls.cleanupStale, { token: args.token });
+    await ctx.runMutation(api.statuses.cleanupExpired, { token: args.token });
   },
 });
 
