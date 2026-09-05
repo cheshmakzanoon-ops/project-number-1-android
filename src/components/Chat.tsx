@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
+import { useSoftQuery } from "../lib/softQuery";
 import {
   ArrowDown,
   ArrowRight,
@@ -88,15 +89,21 @@ export function Chat({
   onCallVideo: () => void;
   onCallAudio: () => void;
 }) {
-  // ---- queries ----
-  const messages = useQuery(api.messages.list, token ? { conversationId, token } : "skip");
-  const convInfo = useQuery(api.conversations.conversation, token ? { conversationId, token } : "skip") as
-    | ConvInfo
-    | undefined;
-  const typers = useQuery(
+  // ---- queries (soft: a backend that can't answer these must never throw
+  // through useQuery and crash the chat onto the error panel — missing data
+  // renders as the normal empty/loading state and fills in automatically).
+  const { data: messages } = useSoftQuery(
+    api.messages.list,
+    token ? { conversationId, token } : "skip",
+  ) as unknown as { data: ChatMessage[] | undefined; unavailable: boolean };
+  const { data: convInfo } = useSoftQuery(
+    api.conversations.conversation,
+    token ? { conversationId, token } : "skip",
+  ) as unknown as { data: ConvInfo | undefined; unavailable: boolean };
+  const { data: typers } = useSoftQuery(
     api.typing.whoIsTyping,
     conversationId && token ? { conversationId, token } : "skip",
-  ) as string[] | undefined;
+  ) as unknown as { data: string[] | undefined; unavailable: boolean };
 
   // ---- mutations ----
   const send = useMutation(api.messages.send);
@@ -129,15 +136,17 @@ export function Chat({
   const [replying, setReplying] = useState<ReplyQuote | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
-  const searchResults = useQuery(
+  const { data: searchResults, unavailable: searchUnavailable } = useSoftQuery(
     api.messages.search,
     searchOpen && searchQ.trim().length > 0 && token ? { conversationId, q: searchQ, token } : "skip",
-  ) as SearchHit[] | undefined;
+  ) as unknown as { data: SearchHit[] | undefined; unavailable: boolean };
   const [jumpAnchor, setJumpAnchor] = useState<Id<"messages"> | null>(null);
-  const anchoredRows = useQuery(
+  // Soft: jump-to-message needs `messages.listAround`; while the backend is
+  // missing it, a tap on an out-of-range quote simply stays put (no crash).
+  const { data: anchoredRows } = useSoftQuery(
     api.messages.listAround,
     jumpAnchor && token ? { conversationId, anchorId: jumpAnchor, token } : "skip",
-  ) as ChatMessage[] | undefined;
+  ) as unknown as { data: ChatMessage[] | undefined; unavailable: boolean };
   const [highlightId, setHighlightId] = useState<Id<"messages"> | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const [viewing, setViewing] = useState<ChatMessage | null>(null);
@@ -1166,11 +1175,13 @@ export function Chat({
               <p className="px-4 py-10 text-center text-sm leading-6 text-dusk-600">
                 هر متنی را بنویس تا پیام‌های این گفتگو را پیدا کنم؛ عکس‌ها با توضیحشان هم پیدا می‌شوند.
               </p>
-            ) : searchResults === undefined ? (
+            ) : searchResults === undefined && !searchUnavailable ? (
               <p className="animate-pulse px-4 py-10 text-center text-sm text-dusk-600">در حال جستجو…</p>
-            ) : searchResults.length === 0 ? (
+            ) : searchResults === undefined || searchResults.length === 0 ? (
               <p className="px-4 py-10 text-center text-sm leading-6 text-dusk-600">
-                چیزی برای «{searchQ.trim()}» پیدا نشد — تا ۳۰۰ پیامِ آخر جستجو می‌شود.
+                {searchUnavailable
+                  ? "جستجو در این نسخه در دسترس نیست — بعداً دوباره امتحان کن."
+                  : `چیزی برای «${searchQ.trim()}» پیدا نشد — تا ۳۰۰ پیامِ آخر جستجو می‌شود.`}
               </p>
             ) : (
               <div>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { Bell, BellRing, X } from "lucide-react";
 import { api } from "./convex/_generated/api";
 import { getDeviceToken } from "./lib/token";
@@ -11,6 +11,7 @@ import { InstallBanner } from "./components/InstallBanner";
 import { useCallkit, type CallKind, type CallPeer } from "./lib/useCallkit";
 import { usePush } from "./lib/usePush";
 import { Avatar } from "./components/Avatar";
+import { useSoftQuery } from "./lib/softQuery";
 import {
   clearCachedIdentity,
   loadCachedIdentity,
@@ -34,10 +35,19 @@ type LobbyTab = "chats" | "status" | "calls";
 
 export function App() {
   const token = useMemo(() => getDeviceToken(), []);
-  const queryMe = useQuery(api.users.me, token ? { token } : "skip") as unknown as
-    | (CachedIdentity & { createdAt: number; lastSeenAt: number })
-    | null
-    | undefined;
+  // Soft: a backend that answers with an error (mid-deploy, function missing
+  // on an older deployment, transient server error) must never throw through
+  // `useQuery` and unmount the app onto the crash panel. It is treated like
+  // "backend unreachable": the friendly retry screen handles it, and the app
+  // springs back to life the moment the same query starts answering.
+  const { data: queryMeData, unavailable: meUnavailable } = useSoftQuery(
+    api.users.me,
+    token ? { token } : "skip",
+  ) as unknown as {
+    data: (CachedIdentity & { createdAt: number; lastSeenAt: number }) | null | undefined;
+    unavailable: boolean;
+  };
+  const queryMe = queryMeData;
   // Every returning device already knows who it is (their name was saved on
   // this phone) — paint the app immediately from that cache while the `me`
   // query refreshes in the background, so repeat visits never wait on a
@@ -222,8 +232,10 @@ export function App() {
     </div>
   );
 
-  // No connection and no (refreshed) identity: surface the retry panel.
-  if (connTrouble && queryMe === undefined) return connTroubleScreen(true);
+  // No connection and no (refreshed) identity: surface the retry panel. An
+  // immediate query error counts as unreachable too — no 9s wait on a dead/
+  // mismatched backend.
+  if ((connTrouble && queryMe === undefined) || meUnavailable) return connTroubleScreen(true);
   // First visit on this device: nothing cached yet, wait briefly.
   if (queryMe === undefined && cachedMe === null) return connTroubleScreen(false);
   // The backend doesn't know this device token (fresh install / reset): sign up.

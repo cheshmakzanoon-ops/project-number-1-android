@@ -106,11 +106,20 @@ export const heartbeat = mutation({
     // every open device generates.
     if (now - u.lastSeenAt < 15_000) return;
     await ctx.db.patch(userId, { lastSeenAt: now });
-    // Opportunistic server housekeeping (dead rings, abandoned active calls,
-    // expired statuses). Every open client already sends this mutation, so
-    // cleanup needs no scheduler of its own.
-    await ctx.runMutation(api.calls.cleanupStale, { token: args.token });
-    await ctx.runMutation(api.statuses.cleanupExpired, { token: args.token });
+    // Opportunistic housekeeping is deliberately fire-and-forget: a transient
+    // failure here (mid-deploy, missing function, internal error) must NEVER
+    // surface to the client or poison the heartbeat — presence is what keeps
+    // the app alive on weak links.
+    try {
+      await ctx.scheduler.runAfter(0, api.calls.cleanupStale, { token: args.token });
+    } catch {
+      /* noop */
+    }
+    try {
+      await ctx.scheduler.runAfter(0, api.statuses.cleanupExpired, { token: args.token });
+    } catch {
+      /* noop */
+    }
   },
 });
 

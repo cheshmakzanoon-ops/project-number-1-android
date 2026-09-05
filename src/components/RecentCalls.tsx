@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
+import { useSoftQuery } from "../lib/softQuery";
 import { PhoneIncoming, PhoneMissed, PhoneOutgoing, Video } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { clock, fa, relative, secondsToClock } from "../lib/format";
@@ -34,9 +34,13 @@ export function RecentCalls({
   token: string;
   onCallBack?: (convId: Id<"conversations">) => void;
 }) {
-  const recent = useQuery(api.calls.recent, token ? { token } : "skip") as unknown as
-    | RecentCallRow[]
-    | undefined;
+  // Soft: while the backend lacks `calls.recent` (older deployment) the tab
+  // shows its empty state instead of crashing the app — call history appears
+  // automatically once the function is live.
+  const { data: recent } = useSoftQuery(api.calls.recent, token ? { token } : "skip") as unknown as {
+    data: RecentCallRow[] | undefined;
+    unavailable: boolean;
+  };
   const [filter, setFilter] = useState<"all" | "missed">("all");
 
   const rows = useMemo(() => {

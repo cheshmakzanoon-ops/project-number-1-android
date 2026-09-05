@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useAction, useMutation } from "convex/react";
 // livekit-client is imported lazily (see livekitLoader) so the app shell
 // never has to download it — it only loads once a call actually starts.
 import type { Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
 import { api } from "../convex/_generated/api";
+import { useSoftQuery } from "./softQuery";
 import type { Id } from "../convex/_generated/dataModel";
 
 export type CallPhase = "idle" | "outgoing" | "incoming" | "active";
@@ -470,9 +471,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
     }
   }, []);
 
-  const myCalls = useQuery(api.calls.myCalls, token ? { token } : "skip") as unknown as
-    | CallRow[]
-    | undefined;
+  // Soft query: an unanswered `calls:myCalls` (backend mid-deploy, function
+  // missing) must mean "no live call right now", never a crash — the call
+  // reconciler below simply stays idle until the query answers.
+  const { data: myCalls } = useSoftQuery(api.calls.myCalls, token ? { token } : "skip") as unknown as {
+    data: CallRow[] | undefined;
+    unavailable: boolean;
+  };
 
   const clearRingTtl = useCallback(() => {
     if (ringTtlRef.current != null) {

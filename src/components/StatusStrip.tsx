@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "convex/react";
+import { useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
+import { useSoftQuery } from "../lib/softQuery";
 import { Camera, Eye, Pencil, Plus, Send, Trash2, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { clock, fa, relative } from "../lib/format";
@@ -37,12 +38,17 @@ export function StatusStrip({
   meId: Id<"users">;
   meName: string;
 }) {
-  const feed = useQuery(api.statuses.feed, token ? { token } : "skip") as unknown as
-    | StatusRow[]
-    | undefined;
-  const mine = useQuery(api.statuses.mine, token ? { token } : "skip") as unknown as
-    | StatusRow[]
-    | undefined;
+  // Soft queries: if the backend doesn't have the statuses module yet (or a
+  // query hiccups), the tab shows its normal empty state instead of crashing
+  // the whole app — and lights up by itself once the module is live.
+  const { data: feed } = useSoftQuery(api.statuses.feed, token ? { token } : "skip") as unknown as {
+    data: StatusRow[] | undefined;
+    unavailable: boolean;
+  };
+  const { data: mine } = useSoftQuery(api.statuses.mine, token ? { token } : "skip") as unknown as {
+    data: StatusRow[] | undefined;
+    unavailable: boolean;
+  };
 
   const post = useMutation(api.statuses.post);
   const remove = useMutation(api.statuses.remove);
@@ -374,9 +380,10 @@ function StatusViewer({
   onDelete: (id: Id<"statuses">) => void | Promise<void>;
   onView: (id: Id<"statuses">) => void;
 }) {
-  const rows = useQuery(api.statuses.forOwner, token ? { token, ownerId } : "skip") as unknown as
-    | StatusRow[]
-    | undefined;
+  const { data: rows } = useSoftQuery(
+    api.statuses.forOwner,
+    token ? { token, ownerId } : "skip",
+  ) as unknown as { data: StatusRow[] | undefined; unavailable: boolean };
   const [idx, setIdx] = useState(0);
   const [progress, setProgress] = useState(0);
   const [showViewers, setShowViewers] = useState(false);

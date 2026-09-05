@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, type MouseEvent, type ReactNode } from "react";
-import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
+import { useSoftQuery } from "../lib/softQuery";
 import { Edit, MessageCircle, Phone, Users, Video } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { StatusStrip } from "./StatusStrip";
@@ -76,13 +76,18 @@ export function Lobby({
   onAudioContact: (c: DirectoryEntry) => void;
   onGroupCreate: (members: ConvPeer[]) => void;
 }) {
-  const conversations = useQuery(
+  // Soft queries: if a backend query can't be answered (older deployment
+  // missing a function, transient error), the lobby shows its loading/empty
+  // state instead of crashing the whole app — and fills in automatically
+  // once the query starts answering.
+  const { data: conversations } = useSoftQuery(
     api.conversations.myConversations,
     token ? { token } : "skip",
-  ) as unknown as LobbyRow[] | undefined;
-  const directory = useQuery(api.users.directory, token ? { token } : "skip") as
-    | DirectoryEntry[]
-    | undefined;
+  ) as unknown as { data: LobbyRow[] | undefined; unavailable: boolean };
+  const { data: directory } = useSoftQuery(api.users.directory, token ? { token } : "skip") as unknown as {
+    data: DirectoryEntry[] | undefined;
+    unavailable: boolean;
+  };
   const [sheet, setSheet] = useState(false);
   const onlineNow = (lastSeenAt: number) => Date.now() - lastSeenAt < 60_000;
 
@@ -364,7 +369,9 @@ function TabPill({
 
 /** Tiny green dot on the وضعیت‌ها tab when someone has a live status. */
 function StatusDotOnline({ token }: { token: string }) {
-  const feed = useQuery(api.statuses.feed, token ? { token } : "skip");
+  // Soft: on a backend whose statuses module isn't deployed yet (or a
+  // transient error) this resolves to no dot instead of crashing the lobby.
+  const { data: feed } = useSoftQuery(api.statuses.feed, token ? { token } : "skip");
   const count = Array.isArray(feed) ? feed.length : 0;
   if (count === 0) return null;
   return <span className="h-2 w-2 rounded-full bg-sage-400" />;
