@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface State {
   error: Error | null;
+  stack: string | null;
 }
 
 /**
@@ -12,14 +13,18 @@ interface State {
  * prints the error to the console so a screenshot/report can name the cause.
  */
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
-  state: State = { error: null };
+  state: State = { error: null, stack: null };
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, stack: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("[garma] crash:", error, info.componentStack);
+    // Show the failing component chain ON the panel: on a phone the console is
+    // effectively invisible, and naming the component is what lets a bug report
+    // (or a screenshot) identify the crash instead of a generic "error".
+    this.setState((prev) => ({ ...prev, stack: info.componentStack || null }));
   }
 
   render() {
@@ -35,7 +40,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
           <p className="text-lg font-extrabold">یک مشکل غیرمنتظره پیش آمد</p>
           <p className="mt-2 text-sm leading-6" style={{ color: "#a9865f" }}>
             اپ از کار افتاد — با دکمهٔ زیر دوباره راه‌اندازی‌اش کن. اگر دوباره تکرار شد،
-            متن خطا را از کنسول مرورگر برای ما بفرست.
+            متن خطا را برای ما بفرست.
           </p>
           <p
             dir="ltr"
@@ -44,6 +49,15 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
           >
             {err.name}: {err.message}
           </p>
+          {this.state.stack && (
+            <p
+              dir="ltr"
+              className="mx-auto mt-2 max-h-28 overflow-auto rounded-xl bg-black/30 px-3 py-2 text-left text-[10px] leading-4"
+              style={{ color: "#c9a678" }}
+            >
+              {this.state.stack}
+            </p>
+          )}
           <button
             type="button"
             onClick={() => window.location.reload()}

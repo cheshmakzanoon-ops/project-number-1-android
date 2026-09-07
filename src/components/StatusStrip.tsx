@@ -416,9 +416,19 @@ function StatusViewer({
     if (progress >= 100) advance();
   }, [progress, advance]);
 
-  // Mark as seen.
+  // Mark as seen — once per status id. `current` is a fresh object on every
+  // reactive delivery (our own view() write changes the row's viewers array,
+  // so the query pushes a new object), so keying the effect off the OBJECT
+  // would call view() again on every delivery — and each view() call writes a
+  // fresh viewedAt, changing the row again, forever. Remember the ids already
+  // marked instead and bail out of the loop.
+  const seenRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (current && !mine) onView(current._id);
+    if (!current || mine) return;
+    const id = String(current._id);
+    if (seenRef.current.has(id)) return;
+    seenRef.current.add(id);
+    onView(current._id);
   }, [current, mine, onView]);
 
   useEffect(() => {
