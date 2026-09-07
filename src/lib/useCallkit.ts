@@ -950,6 +950,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
             setCamOn(!publication.isMuted);
           } else if (publication.source === Track.Source.ScreenShare) {
             setScreenLocal(one(publication.track?.mediaStreamTrack));
+            // sharing flag follows the live publication (see toggleShare)
             setSharing(true);
             sharingRef.current = true;
           } else if (publication.source === Track.Source.Microphone) {
@@ -1074,6 +1075,19 @@ export function useCallkit(token: string | null): GarmaCallkit {
           commitParts();
           setScreenLocal(null);
           setLocal(null);
+          // A full disconnect tears the whole room down, and LiveKit stops
+          // every local capture track with it (including a running screen
+          // share). The share cannot be re-established without a fresh
+          // browser picker + user gesture (and the torn-down tracks' events
+          // are unreliable after this point), so reset the UI to "not
+          // sharing" NOW: otherwise the share button and the "در حال
+          // اشتراک…" chip stay lit forever with no track behind them and the
+          // "پایان اشتراک" tap becomes a silent no-op. After the rejoin the
+          // user simply taps share again.
+          setSharing(false);
+          sharingRef.current = false;
+          setShareStarting(false);
+          setShareError(null);
           setReconnecting(true);
           connRetryDelayRef.current = 1500;
           scheduleConnectRetry(s.callId, s.kind);

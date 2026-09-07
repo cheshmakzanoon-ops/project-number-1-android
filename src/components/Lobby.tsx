@@ -115,6 +115,17 @@ export function Lobby({
     }
   };
 
+  // Tapping a row in the call history calls that person/conversation back
+  // (video is the visible affordance on every history row). The conversation
+  // must still exist in the lobby list to know who to ring.
+  const callRecent = (convId: Id<"conversations">) => {
+    const row = (conversations ?? []).find((r) => r._id === convId);
+    if (!row) return;
+    const peers = peersOf(row, meId);
+    if (peers.length === 0) return;
+    onCall(row._id, peers, "video");
+  };
+
   return (
     <div className="paper relative flex h-full flex-col bg-dusk-50">
       <header className="safe-area px-5 pb-2 pt-2">
@@ -165,7 +176,7 @@ export function Lobby({
         {tab === "status" ? (
           <StatusStrip token={token} meId={meId} meName={meName} />
         ) : tab === "calls" ? (
-          <RecentCalls token={token} />
+          <RecentCalls token={token} onCallBack={callRecent} />
         ) : !conversations ? (
           <LobbySkeleton />
         ) : conversations.length === 0 ? (
