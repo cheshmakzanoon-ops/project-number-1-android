@@ -596,7 +596,7 @@ function VideoStage({
               kind="video"
               muted
               className="h-full w-full object-cover"
-              style={{ transform: "scaleX(-1)" }}
+              style={{ transform: kit.camFacing === "environment" ? "none" : "scaleX(-1)" }}
             />
             <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-semibold text-white/80 backdrop-blur">
               من
@@ -713,7 +713,7 @@ function SpotlightFeed({
             kind="video"
             muted
             className="h-40 w-28 object-cover"
-            style={{ transform: "scaleX(-1)" }}
+            style={{ transform: kit.camFacing === "environment" ? "none" : "scaleX(-1)" }}
           />
           <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] font-semibold text-white/80 backdrop-blur">
             من

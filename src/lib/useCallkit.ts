@@ -4,7 +4,7 @@ import { useAction, useMutation } from "convex/react";
 // never has to download it — it only loads once a call actually starts.
 import type { LocalVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
-import { IS_EMBEDDED, IS_IOS, IS_PHONE, IS_STANDALONE } from "./browser";
+import { IS_EMBEDDED, IS_IOS, IS_PHONE } from "./browser";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "./softQuery";
 import type { Id } from "../convex/_generated/dataModel";
@@ -255,7 +255,8 @@ function netCeilingTier(): number {
  * actually transport — and, when everything collapses, still the lowest one:
  * - 2g / slow-2g: 180p @ 12fps (~170 kbps — EDGE-class uplink floor)
  * - 3g:           480p @ 15fps (~450 kbps)
- * - 4g/5g/WiFi:   1080p @ 30fps (only when the link is truly healthy)
+ * - 4g/5g/WiFi:   720p @ 24fps (auto ceiling; 1080p stays selectable
+ *                  via the in-call quality chip when the link is healthy)
  */
 const CAM_TIERS: ReadonlyArray<{
   label: string;
@@ -921,7 +922,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (publication.source === Track.Source.Camera) {
             setLocal(one(publication.track?.mediaStreamTrack));
             setCamFacing(facingOf(publication.track?.mediaStreamTrack));
-            // probe2
             setCamOn(!publication.isMuted);
           } else if (publication.source === Track.Source.ScreenShare) {
             setScreenLocal(one(publication.track?.mediaStreamTrack));
@@ -1247,7 +1247,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
   /** Build the session object a screen should show for a given call row. */
   const sessionForRow = useCallback(
     (call: CallRow, phase: "outgoing" | "incoming" | "active", joinOffer = false): CallSession => {
-      // PROBE4
       const caller = callerOf(call);
       return {
         callId: call.callId,
@@ -1528,7 +1527,6 @@ export function useCallkit(token: string | null): GarmaCallkit {
   );
 
   const accept = useCallback(async () => {
-    // PROBE5
     if (busyRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
@@ -1593,9 +1591,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   ]);
 
   const decline = useCallback(async () => {
-    // PROBE6
     if (busyRef.current) return;
-    // DPROBE
     const s = sessionRef.current;
     if (!s || !token) return;
     busyRef.current = true;
@@ -1688,39 +1684,109 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const switchCamera = useCallback(async () => {
     const room = roomRef.current;
     if (!room || tierBusyRef.current) return;
+    // The camera must actually be live: flipping a muted/off camera has
+    // nothing to restart (and iOS Safari refuses to open a camera without a
+    // live capture to swap). The flip button is hidden while the camera is
+    // off, so this only guards a tap racing the state update.
+    if (!camIntentRef.current) return;
     const { Track } = livekit();
+    const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+    const pubTrack = pub?.track;
+    if (!pubTrack) return;
+    // The live camera publication's track is a LocalVideoTrack. Restarting
+    // it IN PLACE keeps the SAME publication — the remote side never
+    // re-subscribes and the mic keeps flowing. LiveKit stops the old capture
+    // first (required by Safari) and replaceTrack()s the sender, which is
+    // also why the old hard unpublish/re-publish path glitched on Android.
+    const camTrack = pubTrack as LocalVideoTrack;
+    if (typeof camTrack.restartTrack !== "function") return;
+
+    // Physical cameras with distinct ids (Android/desktop): cycle the list.
     let cams: MediaDeviceInfo[] = [];
     try {
-      cams = (await navigator.mediaDevices.enumerateDevices()).filter(
-        (d) => d.kind === "videoinput" && d.deviceId,
-      );
+      cams = (await navigator.mediaDevices.enumerateDevices())
+        .filter((d) => d.kind === "videoinput" && d.deviceId)
+        .filter((d, i, all) => all.findIndex((x) => x.deviceId === d.deviceId) === i);
     } catch {
-      return;
+      /* fall back to facingMode */
     }
     setCamCount(cams.length);
-    // No second camera → nothing to switch to. (The UI hides the button in
-    // this case; a stray tap here is just a race with devicechange.)
-    if (cams.length < 2) return;
-    // Which camera is actually live right now (track settings beat our
-    // bookkeeping — the browser reports the real device).
-    const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-    const currentId = pub?.track?.mediaStreamTrack?.getSettings().deviceId ?? lastCamIdRef.current;
-    const idx = cams.findIndex((d) => d.deviceId === currentId);
-    const next = idx >= 0 ? cams[(idx + 1) % cams.length] : cams[0];
-    if (!next || !next.deviceId || next.deviceId === currentId) return;
+    const settings = pubTrack.mediaStreamTrack?.getSettings() ?? {};
+    const curId = (settings.deviceId || lastCamIdRef.current) || "";
+    const idx = cams.findIndex((d) => d.deviceId === curId);
+    const nextId =
+      cams.length >= 2 && idx >= 0 ? (cams[(idx + 1) % cams.length]?.deviceId ?? "") : "";
+
+    // Safari (and browsers that only report one "camera") cannot switch by
+    // device id — they honor facingMode. Toggle front <-> back from the
+    // live track's own reported facing.
+    const curFacing = facingOf(pubTrack.mediaStreamTrack) || "user";
+    const wantFacing: "user" | "environment" =
+      curFacing === "environment" ? "user" : "environment";
+    // No distinct ids and not a phone-class device: nothing to flip to
+    // (desktop single-webcam users never see the button).
+    if (!nextId && !IS_PHONE && cams.length < 2) {
+      setCamError("دوربین دومی پیدا نشد");
+      return;
+    }
+
+    const plan = CAM_TIERS[captureTierRef.current] ?? CAM_TIERS[CAM_TIERS.length - 1];
+    const base = { resolution: plan.resolution, frameRate: plan.frameRate };
     const previous = lastCamIdRef.current;
-    lastCamIdRef.current = next.deviceId;
+    const previousFacing = curFacing;
+    const restart = (opts: { deviceId?: { exact: string }; facingMode?: "user" | "environment" }) =>
+      withTimeout(camTrack.restartTrack({ ...base, ...opts }), 15_000, "cam_switch_timeout");
+
+    tierBusyRef.current = true;
     setCamError(null);
-    if (camIntentRef.current) {
-      // Re-capture on the target device through the hard-publish path
-      // (LiveKit's own switchActiveDevice restarts the SAME track, which is
-      // unreliable on Android Chrome).
+    // Try in order: exact next device -> facing-mode toggle (covers iOS and
+    // browsers whose ids do not actually switch) -> fresh full publish.
+    // Stop at the first strategy that succeeds.
+    const attempts: Array<() => Promise<unknown>> = [];
+    if (nextId) attempts.push(() => restart({ deviceId: { exact: nextId } }));
+    attempts.push(() => restart({ facingMode: wantFacing }));
+    if (nextId && cams.length >= 2) {
+      // Backstop: another distinct id (differs when curId pointed at the
+      // last entry of the list).
+      const alt = cams.find((d) => d.deviceId !== curId && d.deviceId !== nextId);
+      if (alt) attempts.push(() => restart({ deviceId: { exact: alt.deviceId } }));
+    }
+    attempts.push(async () => {
       const ok = await captureCameraAt(captureTierRef.current, { enable: true });
-      if (!ok) {
-        lastCamIdRef.current = previous;
-        setCamError("تعویض دوربین ممکن نشد؛ دوباره تلاش کن");
+      if (!ok) throw new Error("republish_failed");
+    });
+
+    let switched = false;
+    for (const attempt of attempts) {
+      try {
+        await attempt();
+        switched = true;
+        break;
+      } catch {
+        /* try the next strategy */
       }
     }
+    const nt = pub?.track?.mediaStreamTrack;
+    const realId = nt?.getSettings().deviceId ?? "";
+    const newFacing = facingOf(nt);
+    if (switched) {
+      lastCamIdRef.current = realId || (nextId && !IS_PHONE ? nextId : "");
+      setCamFacing(newFacing);
+      setLocal(one(nt));
+      setCamOn(true);
+      // A "success" that landed back on the same physical camera (browser
+      // kept its default; Safari duplicate-id cases) is reported honestly so
+      // the user taps again instead of staring at no change.
+      const changed =
+        (nextId && realId !== "" && realId !== curId && realId !== previous) ||
+        (!nextId && newFacing === wantFacing);
+      if (!changed) setCamError("دوربین عوض نشد؛ دوباره امتحان کن");
+    } else {
+      lastCamIdRef.current = previous;
+      setCamFacing(previousFacing);
+      setCamError("تعویض دوربین ممکن نشد؛ دوباره تلاش کن");
+    }
+    tierBusyRef.current = false;
   }, [captureCameraAt]);
 
   /**
@@ -1857,7 +1923,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
     clearCamError,
     micError,
     clearMicError,
-    canSwitchCamera: videoSessionActive && camCount >= 2,
+    canSwitchCamera: videoSessionActive && camOn && (camCount >= 2 || IS_PHONE),
+    camFacing,
     local,
     screenLocal,
     remotes,
