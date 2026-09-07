@@ -588,8 +588,28 @@ function VideoStage({
 
       <div className="grid h-full min-h-0 grid-cols-2 gap-1.5 p-1.5">
         {tiles}
-        {/* my own camera tile in a corner of the grid too */}
-        {kit.camOn && kit.local && (
+        {/* my own tile in the grid: the shared screen while sharing (with an
+            inline stop control — the sharer must see + be able to end what
+            everyone else is watching), otherwise my camera preview */}
+        {kit.sharing && kit.screenLocal ? (
+          <div className="relative min-h-0 overflow-hidden rounded-xl border border-sage-400/40 bg-[#170e06]">
+            <MediaFeed
+              stream={kit.screenLocal}
+              kind="video"
+              muted
+              className="h-full w-full bg-black object-contain"
+            />
+            <span className="absolute right-1.5 top-1.5 rounded-full bg-sage-600/90 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur">
+              من
+            </span>
+            <button
+              onClick={kit.toggleShare}
+              className="absolute inset-x-1.5 bottom-1.5 rounded-full bg-rose-500/95 py-1.5 text-[11px] font-bold text-white backdrop-blur transition hover:bg-rose-600 active:scale-95"
+            >
+              پایان اشتراک صفحه
+            </button>
+          </div>
+        ) : kit.camOn && kit.local ? (
           <div className="relative min-h-0 overflow-hidden rounded-xl border border-white/10 bg-[#170e06]">
             <MediaFeed
               stream={kit.local}
@@ -602,7 +622,7 @@ function VideoStage({
               من
             </span>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );

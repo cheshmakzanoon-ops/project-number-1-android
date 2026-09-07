@@ -679,7 +679,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
       o2.connect(gain);
       o1.start();
       o2.start();
+      // iOS/Safari create every AudioContext "suspended" until the page has
+      // seen a user gesture. Ask to resume right away — once the app has had
+      // any tap (signup, opening a chat…) this is what actually makes the
+      // ring audible; on desktop it is a no-op.
+      const ensureRunning = () => {
+        try {
+          if (ctx.state !== "running") void ctx.resume();
+        } catch {
+          /* noop */
+        }
+      };
+      ensureRunning();
       const tone = () => {
+        ensureRunning();
         gain.gain.setTargetAtTime(0.22, ctx.currentTime, 0.02);
         window.setTimeout(() => {
           gain.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
@@ -708,9 +721,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
    * publish, network upgrades/downgrades, congestion stepping and manual caps.
    */
   const captureCameraAt = useCallback(
-    async (tier: number, opts?: { enable?: boolean }): Promise<boolean> => {
+    async (tier: number, opts?: { enable?: boolean; force?: boolean }): Promise<boolean> => {
       const room = roomRef.current;
-      if (!room || tierBusyRef.current) return false;
+      // `force` bypasses the busy lock for callers that ALREADY hold it (the
+      // switch-camera fallback runs while the switch holds tierBusy) — without
+      // it that fallback would always early-return false and never republish.
+      if (!room || (tierBusyRef.current && !opts?.force)) return false;
       const { Track } = livekit();
       const plan = CAM_TIERS[tier];
       if (!plan) return false;
@@ -832,6 +848,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
           const s = sessionRef.current;
           if (!s || s.callId !== callId) return;
           if (s.phase !== "active" && s.phase !== "outgoing") return;
+          // A user action (accept/start) is mid-flight and already owns the
+          // connect path. Firing a parallel connect here would open a second
+          // LiveKit room for the same identity — the server closes the older
+          // connection, dropping that room's camera/mic publications mid-call.
+          // Defer until the action settles instead.
+          if (busyRef.current) {
+            scheduleConnectRetry(callId, kind);
+            return;
+          }
           const res = await connectMediaRef.current(callId, kind, {
             restoreState: s.phase === "active",
           });
@@ -1380,17 +1405,18 @@ export function useCallkit(token: string | null): GarmaCallkit {
       // call was still ringing): bring the ring back so I can see it connect
       // when someone answers. Timer armed with only the remaining TTL.
       if (!isIncomingForMe) {
-        setSession(sessionForRow(call, "outgoing"));          if (ringTtlRef.current == null) {
-            const remain = Math.max(500, ttl - age);
-            ringTtlRef.current = window.setTimeout(() => {
-              const s = sessionRef.current;
-              if (!s || s.callId !== call.callId || s.phase !== "outgoing") return;
-              leaveRef.current = { callId: call.callId, wanted: "missed" };
-              void closeCallNotification(call.callId);
-              void endCallMut({ callId: call.callId, token, status: "missed" });
-              cleanup();
-            }, remain);
-          }
+        setSession(sessionForRow(call, "outgoing"));
+        if (ringTtlRef.current == null) {
+          const remain = Math.max(500, ttl - age);
+          ringTtlRef.current = window.setTimeout(() => {
+            const s = sessionRef.current;
+            if (!s || s.callId !== call.callId || s.phase !== "outgoing") return;
+            leaveRef.current = { callId: call.callId, wanted: "missed" };
+            void closeCallNotification(call.callId);
+            void endCallMut({ callId: call.callId, token, status: "missed" });
+            cleanup();
+          }, remain);
+        }
         joinResumeRef.current(call, "outgoing");
         return;
       }
@@ -1752,7 +1778,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
       if (alt) attempts.push(() => restart({ deviceId: { exact: alt.deviceId } }));
     }
     attempts.push(async () => {
-      const ok = await captureCameraAt(captureTierRef.current, { enable: true });
+      const ok = await captureCameraAt(captureTierRef.current, {
+        enable: true,
+        // This fallback runs while the switch already holds the busy lock;
+        // force lets the fresh publish actually execute.
+        force: true,
+      });
       if (!ok) throw new Error("republish_failed");
     });
 
@@ -1766,7 +1797,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
         /* try the next strategy */
       }
     }
-    const nt = pub?.track?.mediaStreamTrack;
+    // Read the LIVE publication afterwards: in-place restarts keep the same
+    // publication, but the fresh-publish fallback replaces it, so the stale
+    // `pub` handle above would point at an ended track after a fallback.
+    const nt =
+      room.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack ??
+      null;
     const realId = nt?.getSettings().deviceId ?? "";
     const newFacing = facingOf(nt);
     if (switched) {
