@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode, type R
 import {
   CameraOff,
   Camera,
+  ExternalLink,
   FlipHorizontal,
   Maximize,
   Mic,
@@ -12,9 +13,11 @@ import {
   PhoneOff,
   Users,
   Volume2,
+  X,
 } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { fa } from "../lib/format";
+import { IS_EMBEDDED, openAppTopLevel } from "../lib/browser";
 import type { CallSession, GarmaCallkit, RemotePeer } from "../lib/useCallkit";
 
 function useElapsed(phase: CallSession["phase"]) {
@@ -58,6 +61,13 @@ export function CallOverlay({
   const containerRef = useRef<HTMLDivElement>(null);
   const [fs, setFs] = useState(false);
   const busy = kit.busy;
+
+  // Inside an embedded frame (the dev preview pane) browsers withhold
+  // camera/mic/screen capture, so those controls fail however often they are
+  // tapped. Explain once and offer to open the app in a real top-level tab.
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const [hintNote, setHintNote] = useState(false);
+  const needsMediaHint = showVideo || !!kit.camError || !!kit.micError || !!kit.shareError;
 
   useEffect(() => {
     const onFullscreen = () => setFs(Boolean(document.fullscreenElement));
@@ -184,6 +194,51 @@ export function CallOverlay({
             "radial-gradient(620px 440px at 50% 16%, rgba(234,138,62,0.25), transparent 60%), radial-gradient(500px 400px at 100% 110%, rgba(93,156,115,0.12), transparent 55%)",
         }}
       />
+
+      {/* Embedded-preview lock explanation with an "open directly" escape.
+          Only ever shown when the app is inside an iframe (dev preview); a
+          normal top-level tab or installed app never sees it. */}
+      {IS_EMBEDDED && !hintDismissed && needsMediaHint && (
+        <div className="animate-rise absolute inset-x-3 top-16 z-40 flex justify-center">
+          <div className="flex w-full max-w-sm flex-col gap-2 rounded-2xl border border-amber-300/30 bg-[#241206]/95 px-3.5 py-2.5 shadow-2xl shadow-black/50 backdrop-blur-xl">
+            <div className="flex items-start gap-2.5">
+              <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-amber-400/20 text-amber-200">
+                <ExternalLink size={15} />
+              </span>
+              <p className="min-w-0 flex-1 pt-1 text-[12px] font-extrabold leading-5 text-amber-50">
+                دوربین و اشتراک صفحه در پیش‌نمایش قفل‌اند
+              </p>
+              <button
+                onClick={() => setHintDismissed(true)}
+                aria-label="بستن"
+                className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <p className="pr-[42px] text-[11px] leading-5 text-white/70">
+              مرورگر داخل کادر پیش‌نمایش اجازهٔ دوربین، میکروفون و صفحه را نمی‌دهد؛ اپ را در تب جدید
+              باز کن تا اجازه‌ها درخواست شود.
+            </p>
+            <div className="mr-auto flex items-center gap-2">
+              <button
+                onClick={() => {
+                  if (!openAppTopLevel()) setHintNote(true);
+                }}
+                className="flex items-center gap-1.5 rounded-full bg-amber-400 px-3.5 py-1.5 text-[12px] font-extrabold text-cocoa shadow-md shadow-black/30 transition hover:bg-amber-300 active:scale-95"
+              >
+                <ExternalLink size={13} />
+                باز کردن اپ در تب جدید
+              </button>
+              {hintNote && (
+                <span className="text-[10px] font-semibold leading-4 text-amber-200/85">
+                  اگر تب باز نشد، دکمهٔ «باز کردن در تب جدید» را بالای پیش‌نمایش بزن.
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* NOTE: remote audio plays through exactly ONE element per person (the
           audio elements useCallkit attaches on TrackSubscribed). The video

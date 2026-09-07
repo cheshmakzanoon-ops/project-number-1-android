@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAction, useMutation } from "convex/react";
 // livekit-client is imported lazily (see livekitLoader) so the app shell
 // never has to download it — it only loads once a call actually starts.
-import type { Room, TrackPublication, VideoEncoding } from "livekit-client";
+import type { LocalVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
+import { IS_EMBEDDED, IS_IOS, IS_PHONE, IS_STANDALONE } from "./browser";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "./softQuery";
 import type { Id } from "../convex/_generated/dataModel";
@@ -85,6 +86,10 @@ export interface GarmaCallkit {
   clearMicError: () => void;
   /** True when this device actually lists a second camera to flip to. */
   canSwitchCamera: boolean;
+  /** Which physical side of the phone the live camera points at (drives
+   *  whether the self preview is mirrored): "user" = front, "environment" =
+   *  back, "" = unknown (desktop webcam). */
+  camFacing: "user" | "environment" | "";
   local: MediaStream | null;
   screenLocal: MediaStream | null;
   /** Live remote participants (in the media room, tracks flowing or muted). */
@@ -167,29 +172,6 @@ function callerOf(call: CallRow): { userId: Id<"users">; displayName: string; th
  */
 type ConnectResult = true | "retryable" | "unauthorized" | "livekit_not_configured";
 
-/**
- * True when the app runs inside an embedded frame (the Freebuff preview
- * pane, another site, a WebView wrapper). Browsers withhold camera, mic and
- * screen capture from cross-origin iframes unless the EMBEDDING page grants
- * them via `<iframe allow="camera; microphone; display-capture">` — the app
- * itself cannot override that. This is the usual reason a call "connects but
- * no media ever starts" inside a preview.
- */
-const IS_EMBEDDED = (() => {
-  try {
-    return window.self !== window.top;
-  } catch {
-    return true; // reading top is blocked ⇒ cross-origin frame ⇒ embedded
-  }
-})();
-
-/** iPhone / iPad (UA + iPadOS≥13 which masquerades as a Mac). */
-const IS_IOS =
-  /iP(hone|ad|od)/i.test(navigator.userAgent) ||
-  (/Macintosh/i.test(navigator.userAgent) &&
-    typeof navigator.maxTouchPoints === "number" &&
-    navigator.maxTouchPoints > 1);
-
 /** A human-readable Persian explanation for a failed camera start. */
 function camFailureMessage(denied: boolean): string {
   if (IS_EMBEDDED) {
@@ -203,6 +185,12 @@ function camFailureMessage(denied: boolean): string {
 
 function one(media: MediaStreamTrack | null | undefined): MediaStream | null {
   return media ? new MediaStream([media]) : null;
+}
+
+/** The camera's physical facing ("" when the browser doesn't report one). */
+function facingOf(track: MediaStreamTrack | null | undefined): "user" | "environment" | "" {
+  const f = track?.getSettings().facingMode;
+  return f === "user" || f === "environment" ? f : "";
 }
 
 /**
@@ -243,9 +231,17 @@ function netTier(effectiveType?: string): number {
 
 /**
  * The camera tier each network class starts at (and, in auto mode, may step
- * back up to): 2g/slow-2g → 180p, 3g → 480p, 4g/5g/WiFi/unknown → 1080p.
+ * back up to): 2g/slow-2g → 180p, 3g → 480p, 4g/5g/WiFi/unknown → 720p.
+ *
+ * 1080p is deliberately NOT the automatic ceiling for fast links: the auto
+ * tier is what two phones on mobile data (often asymmetric 4G with a weak
+ * uplink) start at, and 1080p@30 ~2.5 Mbps will choke that uplink — the
+ * call then looks "connected but no video". 720p@24 ~1.2 Mbps is visually
+ * identical on phone screens and fits a real-world mobile uplink; anyone on
+ * solid WiFi/desktop can still step up to 1080p manually via the quality
+ * chip in the call.
  */
-const TIER_BY_NET_CLASS: ReadonlyArray<number> = [0, 1, 3];
+const TIER_BY_NET_CLASS: ReadonlyArray<number> = [0, 1, 2];
 
 /** The tier the current network class allows in auto mode. */
 function netCeilingTier(): number {
@@ -353,6 +349,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const [busy, setBusy] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [camQuality, setCamQuality] = useState<string | null>(null);
+  const [camFacing, setCamFacing] = useState<"user" | "environment" | "">("");
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [screenLocal, setScreenLocal] = useState<MediaStream | null>(null);
 
@@ -402,6 +399,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
     const refresh = () => {
       md.enumerateDevices()
         .then((devices) =>
+          // Browser permission gates the real device ids: until the camera
+          // has been opened, devices come back with empty ids/labels and the
+          // count would read 0. Re-run whenever the camera turns on (that's
+          // when the ids appear) as well as on devicechange.
           setCamCount(devices.filter((d) => d.kind === "videoinput" && d.deviceId).length),
         )
         .catch(() => {});
@@ -409,7 +410,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
     refresh();
     md.addEventListener?.("devicechange", refresh);
     return () => md.removeEventListener?.("devicechange", refresh);
-  }, [videoSessionActive]);
+  }, [videoSessionActive, camOn]);
 
   const partOf = useCallback((userId: string): Part => {
     let p = partsRef.current.get(userId);
@@ -615,6 +616,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setShareError(null);
     setShareStarting(false);
     setCamQuality(null);
+    setCamFacing("");
     setReconnecting(false);
     setCamError(null);
     setMicError(null);
@@ -765,6 +767,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
         const repub = room.localParticipant.getTrackPublication(Track.Source.Camera);
         const realId = repub?.track?.mediaStreamTrack?.getSettings().deviceId;
         if (realId) lastCamIdRef.current = realId;
+        setCamFacing(facingOf(repub?.track?.mediaStreamTrack));
         captureTierRef.current = tier;
         setCamQuality(plan.label);
         return true;
@@ -917,6 +920,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (roomRef.current !== r) return;
           if (publication.source === Track.Source.Camera) {
             setLocal(one(publication.track?.mediaStreamTrack));
+            setCamFacing(facingOf(publication.track?.mediaStreamTrack));
+            // probe2
             setCamOn(!publication.isMuted);
           } else if (publication.source === Track.Source.ScreenShare) {
             setScreenLocal(one(publication.track?.mediaStreamTrack));
@@ -928,8 +933,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
         });
         room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
           if (roomRef.current !== r) return;
-          if (publication.source === Track.Source.Camera) setLocal(null);
-          else if (publication.source === Track.Source.ScreenShare) {
+          if (publication.source === Track.Source.Camera) {
+            setLocal(null);
+            setCamFacing("");
+          } else if (publication.source === Track.Source.ScreenShare) {
             setScreenLocal(null);
             setSharing(false);
             sharingRef.current = false;
@@ -1240,6 +1247,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   /** Build the session object a screen should show for a given call row. */
   const sessionForRow = useCallback(
     (call: CallRow, phase: "outgoing" | "incoming" | "active", joinOffer = false): CallSession => {
+      // PROBE4
       const caller = callerOf(call);
       return {
         callId: call.callId,
@@ -1520,6 +1528,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   );
 
   const accept = useCallback(async () => {
+    // PROBE5
     if (busyRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
@@ -1584,7 +1593,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
   ]);
 
   const decline = useCallback(async () => {
+    // PROBE6
     if (busyRef.current) return;
+    // DPROBE
     const s = sessionRef.current;
     if (!s || !token) return;
     busyRef.current = true;

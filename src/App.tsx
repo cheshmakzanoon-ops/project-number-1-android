@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation } from "convex/react";
-import { Bell, BellRing, X } from "lucide-react";
+import { Bell, BellRing, ExternalLink, X } from "lucide-react";
 import { api } from "./convex/_generated/api";
+import { IS_EMBEDDED, openAppTopLevel } from "./lib/browser";
 import { getDeviceToken } from "./lib/token";
 import { Signup } from "./components/Signup";
 import { Lobby } from "./components/Lobby";
@@ -65,6 +66,10 @@ export function App() {
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
   const [tab, setTab] = useState<LobbyTab>("chats");
+  // Embedded-preview (dev pane) notice: browsers withhold camera/mic/screen
+  // capture from iframes, so media features must be tried in a real tab.
+  const [embHintDismissed, setEmbHintDismissed] = useState(false);
+  const [embHintNote, setEmbHintNote] = useState(false);
   // "زنگ تماس" (notification) banner — hidden for this session after dismiss.
   const [notifDismissed, setNotifDismissed] = useState(false);
   const callkit = useCallkit(token);
@@ -284,6 +289,46 @@ export function App() {
       style={{ background: "var(--color-dusk-50)" }}
     >
       <InstallBanner />
+      {/* Only inside an embedded frame (the dev preview) — a top-level tab or
+          an installed app never sees this. Camera/mic/screen capture need a
+          real tab, so offer to open one before the user taps call. */}
+      {IS_EMBEDDED && !embHintDismissed && (
+        <div
+          role="status"
+          className="animate-rise relative z-30 mx-3 mt-2 flex items-center gap-3 rounded-2xl border border-ember-400/25 bg-gradient-to-l from-dusk-100/95 via-[#2a1a0a]/95 to-dusk-100/95 px-3 py-2.5 shadow-lg shadow-black/40 backdrop-blur"
+        >
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ember-400/90 text-cocoa">
+            <ExternalLink size={16} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-extrabold text-dusk-950">تماس‌ها را در تب جدید تست کن</p>
+            <p className="mt-0.5 text-[11px] leading-5 text-dusk-600">
+              پیش‌نمایش دوربین، میکروفون و اشتراک صفحه را قفل می‌کند؛ اپ را مستقیم باز کن.
+              {embHintNote &&
+                " اگر تب باز نشد، دکمهٔ «باز کردن در تب جدید» را بالای پیش‌نمایش بزن."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (openAppTopLevel()) setEmbHintDismissed(true);
+              else setEmbHintNote(true);
+            }}
+            className="flex shrink-0 items-center gap-1.5 rounded-full bg-ember-400 px-3.5 py-2 text-xs font-extrabold text-cocoa shadow-md shadow-black/30 transition hover:bg-ember-300 active:scale-95"
+          >
+            <ExternalLink size={14} strokeWidth={2.5} />
+            باز کردن
+          </button>
+          <button
+            type="button"
+            onClick={() => setEmbHintDismissed(true)}
+            aria-label="بعداً"
+            className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-dusk-500 transition hover:bg-dusk-300/40 hover:text-dusk-700 active:scale-90"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
       {showNotifBanner && (
         <div
           role="status"
