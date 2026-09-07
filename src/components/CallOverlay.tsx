@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   CameraOff,
   Camera,
@@ -16,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { Avatar } from "./Avatar";
+import { RemoteVideoFeed } from "./RemoteVideoFeed";
 import { fa } from "../lib/format";
 import { IS_EMBEDDED, openAppTopLevel } from "../lib/browser";
 import type { CallSession, GarmaCallkit, RemotePeer } from "../lib/useCallkit";
@@ -377,7 +378,7 @@ export function CallOverlay({
       {active && showVideo && (
         <div className="relative z-10 flex min-h-0 flex-1 flex-col">            {/* main region */}
             <div className="relative flex-1 overflow-hidden bg-[#120a05]">
-              <VideoStage kit={kit} session={session} elapsed={elapsed} />
+              <VideoStage kit={kit} session={session} elapsed={elapsed} visible={!hidden} />
             </div>
 
           {/* control center */}
@@ -525,10 +526,13 @@ function VideoStage({
   kit,
   session,
   elapsed,
+  visible,
 }: {
   kit: GarmaCallkit;
   session: CallSession;
   elapsed: number;
+  /** Remote video elements attach only while the overlay is not minimized. */
+  visible: boolean;
 }) {
   const joinedPeers = (session.peers ?? []).filter((p) => p.joined);
   const videoSources = joinedPeers.filter((peer) => {
@@ -554,6 +558,7 @@ function VideoStage({
         name={target.displayName}
         color={target.themeColor}
         localPreview={!kit.sharing}
+        visible={visible}
       />
     );
   }
@@ -576,7 +581,13 @@ function VideoStage({
   const tiles = joinedPeers.map((peer) => {
     const live = kit.remotes.find((r) => r.userId === peer.userId);
     return (
-      <GridTile key={peer.userId} peer={live} name={peer.displayName} color={peer.themeColor} />
+      <GridTile
+        key={peer.userId}
+        peer={live}
+        name={peer.displayName}
+        color={peer.themeColor}
+        visible={visible}
+      />
     );
   });
 
@@ -606,12 +617,7 @@ function VideoStage({
             everyone else is watching), otherwise my camera preview */}
         {kit.sharing && kit.screenLocal ? (
           <div className="relative min-h-0 overflow-hidden rounded-xl border border-sage-400/40 bg-[#170e06]">
-            <MediaFeed
-              stream={kit.screenLocal}
-              kind="video"
-              muted
-              className="h-full w-full bg-black object-contain"
-            />
+            <LocalVideoFeed stream={kit.screenLocal} className="h-full w-full bg-black object-contain" />
             <span className="absolute right-1.5 top-1.5 rounded-full bg-sage-600/90 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur">
               من
             </span>
@@ -624,10 +630,8 @@ function VideoStage({
           </div>
         ) : kit.camOn && kit.local ? (
           <div className="relative min-h-0 overflow-hidden rounded-xl border border-white/10 bg-[#170e06]">
-            <MediaFeed
+            <LocalVideoFeed
               stream={kit.local}
-              kind="video"
-              muted
               className="h-full w-full object-cover"
               style={{ transform: kit.camFacing === "environment" ? "none" : "scaleX(-1)" }}
             />
@@ -648,22 +652,27 @@ function SpotlightFeed({
   name,
   color,
   localPreview,
+  visible,
 }: {
   kit: GarmaCallkit;
   live: RemotePeer | undefined;
   name: string;
   color: string;
   localPreview: boolean;
+  visible: boolean;
 }) {
-  const showShare = live?.screen && live.screenOn;
+  // Screen always outranks camera in the spotlight; the renderer picks the
+  // actual SDK track that occupies the chosen source.
+  const screenTrack = live?.screen && live.screenOn ? live.screen : null;
+  const cameraTrack = live?.cam && live.camOn ? live.cam : null;
   return (
     <div className="relative h-full w-full">
-      {showShare ? (
+      {screenTrack ? (
         <>
-          <MediaFeed
-            stream={live!.screen!}
-            kind="video"
-            muted
+          <RemoteVideoFeed
+            track={screenTrack}
+            source="screen"
+            visible={visible}
             className="absolute inset-0 h-full w-full bg-[#170e06] object-contain"
           />
           <div className="pointer-events-none absolute inset-x-0 bottom-6 flex justify-center">
@@ -672,14 +681,16 @@ function SpotlightFeed({
             </span>
           </div>
         </>
-      ) : live && live.cam && live.camOn ? (
-        <MediaFeed
-          stream={live.cam}
-          kind="video"
-          muted
+      ) : cameraTrack ? (
+        <RemoteVideoFeed
+          track={cameraTrack}
+          source="camera"
+          visible={visible}
           className="absolute inset-0 h-full w-full bg-[#170e06] object-cover"
         />
       ) : (
+        // Absent track = connecting/unavailable picture; a retained camera
+        // track plus its mute flag is the only proof of a real camera-off.
         <div className="flex h-full w-full flex-col items-center justify-center bg-[radial-gradient(circle_at_50%_30%,#2e2118,#0f0a06)]">
           <div className="rounded-[40px] bg-gradient-to-br from-ember-400/30 to-sage-400/15 p-2">
             {live && !live.camOn && live.cam ? (
@@ -691,7 +702,9 @@ function SpotlightFeed({
             )}
           </div>
           <p className="mt-4 text-sm text-white/55">
-            {live && !live.camOn ? `دوربین ${name} خاموش است` : "در حال اتصال تصویر…"}
+            {live && !live.camOn && live.cam
+              ? `دوربین ${name} خاموش است`
+              : "در حال اتصال تصویر…"}
           </p>
         </div>
       )}
@@ -723,13 +736,11 @@ function SpotlightFeed({
         </div>
       </div>
 
-      {/* local preview / share preview corner */}
+      {/* local preview / share preview corner (always a browser stream) */}
       {kit.sharing && kit.screenLocal ? (
         <div className="absolute bottom-5 left-4 z-10 w-44 overflow-hidden rounded-2xl border border-sage-400/40 bg-[#170e06] shadow-2xl">
-          <MediaFeed
+          <LocalVideoFeed
             stream={kit.screenLocal}
-            kind="video"
-            muted
             className="aspect-video w-full bg-black object-contain"
           />
           <button
@@ -741,10 +752,8 @@ function SpotlightFeed({
         </div>
       ) : kit.camOn && kit.local && localPreview ? (
         <div className="absolute bottom-5 left-4 z-10 overflow-hidden rounded-2xl border border-white/15 bg-[#170e06] shadow-2xl">
-          <MediaFeed
+          <LocalVideoFeed
             stream={kit.local}
-            kind="video"
-            muted
             className="h-40 w-28 object-cover"
             style={{ transform: kit.camFacing === "environment" ? "none" : "scaleX(-1)" }}
           />
@@ -762,19 +771,29 @@ function GridTile({
   peer,
   name,
   color,
+  visible,
 }: {
   peer: RemotePeer | undefined;
   name: string;
   color: string;
+  visible: boolean;
 }) {
-  const content = peer?.screen && peer.screenOn ? peer.screen : peer?.cam && peer.camOn ? peer.cam : null;
+  // Screen first, otherwise camera, otherwise an avatar tile. Never mirrors
+  // remote video (only the local self-preview mirrors).
+  const screenTrack = peer?.screen && peer.screenOn ? peer.screen : null;
+  const cameraTrack = peer?.cam && peer.camOn ? peer.cam : null;
+  const content = screenTrack
+    ? { track: screenTrack, source: "screen" as const }
+    : cameraTrack
+      ? { track: cameraTrack, source: "camera" as const }
+      : null;
   return (
     <div className="relative min-h-0 overflow-hidden rounded-xl border border-white/10 bg-[#170e06]">
       {content ? (
-        <MediaFeed
-          stream={content}
-          kind="video"
-          muted
+        <RemoteVideoFeed
+          track={content.track}
+          source={content.source}
+          visible={visible}
           className="h-full w-full bg-[#170e06] object-contain"
         />
       ) : (
@@ -796,31 +815,41 @@ function GridTile({
   );
 }
 
-function MediaFeed({
+/** LOCAL media only: assigns an owned browser stream to the element's
+ *  srcObject. Remote video never goes through here — it uses
+ *  RemoteVideoFeed (SDK attach). Audio uses useCallkit's own element. */
+function LocalVideoFeed({
   stream,
-  kind,
   className,
   style,
-  muted = true,
 }: {
   stream: MediaStream;
-  kind: "video" | "audio";
   className?: string;
   style?: CSSProperties;
-  muted?: boolean;
 }) {
-  const ref = useRef<HTMLMediaElement>(null);
+  const ref = useRef<HTMLVideoElement>(null);
   useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
     try {
-      if (ref.current) ref.current.srcObject = stream;
+      el.srcObject = stream;
     } catch {
       /* noop */
     }
+    return () => {
+      // Element-only cleanup: pause and clear only when the element still
+      // references THIS stream. Never stops the local capture tracks.
+      try {
+        if (el.srcObject === stream) {
+          el.pause();
+          el.srcObject = null;
+        }
+      } catch {
+        /* noop */
+      }
+    };
   }, [stream]);
-  if (kind === "audio") {
-    return <audio ref={ref as Ref<HTMLAudioElement>} autoPlay playsInline muted={muted} className={className} style={style} />;
-  }
-  return <video ref={ref as Ref<HTMLVideoElement>} autoPlay playsInline muted={muted} className={className} style={style} />;
+  return <video ref={ref} autoPlay playsInline muted className={className} style={style} />;
 }
 
 function Badge({ icon }: { icon: ReactNode }) {

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b --noEmit && vite build",
     "typecheck": "tsc -b --noEmit",
-    "convex:dev": "convex dev --once"
+    "convex:dev": "convex dev --once",
+    "test:call-video": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.0",
@@ -27,6 +28,10 @@
     "web-push": "^3.6.7"
   },
   "devDependencies": {
-    "@types/web-push": "^3.6.4"
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/react": "16.3.3",
+    "@types/web-push": "^3.6.4",
+    "jsdom": "26.1.0",
+    "vitest": "3.2.7"
   }
 }

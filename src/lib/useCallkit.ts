@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAction, useMutation } from "convex/react";
 // livekit-client is imported lazily (see livekitLoader) so the app shell
 // never has to download it — it only loads once a call actually starts.
-import type { LocalVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
+import type { LocalVideoTrack, RemoteVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
 import { IS_EMBEDDED, IS_IOS, IS_PHONE } from "./browser";
 import { api } from "../convex/_generated/api";
@@ -45,8 +45,10 @@ export interface RemotePeer {
   displayName: string;
   themeColor: string;
   mic: MediaStream | null;
-  cam: MediaStream | null;
-  screen: MediaStream | null;
+  /** The exact subscribed SDK track; the renderer attaches it. */
+  cam: RemoteVideoTrack | null;
+  /** The exact subscribed SDK track; the renderer attaches it. */
+  screen: RemoteVideoTrack | null;
   micOn: boolean;
   camOn: boolean;
   screenOn: boolean;
@@ -335,6 +337,72 @@ function withTimeout<T>(p: Promise<T>, ms: number, label = "timeout"): Promise<T
   });
 }
 
+/**
+ * One remote video source (camera or screen) of a participant: the SDK
+ * `RemoteVideoTrack` currently occupying that slot plus bookkeeping to
+ * release it. Disposal never stops the track, never detaches every SDK
+ * element and never touches audio — component unmounts own element
+ * attachments, participant storage owns listeners, the room lifecycle owns
+ * the media session.
+ */
+type RemoteVideoSlot = {
+  track: RemoteVideoTrack;
+  publicationSid: string;
+  removeEndedListener: () => void;
+};
+
+/**
+ * Per-remote-participant bookkeeping, keyed by LiveKit identity (== user id);
+ * a version tick re-renders the snapshot after any mutation. Video is stored
+ * as SDK tracks (slots), never reconstructed browser streams, so the SDK's
+ * adaptive-stream visibility observation and the element renderer can both
+ * act on the real object.
+ */
+interface Part {
+  userId: string;
+  micEls: Set<HTMLAudioElement>;
+  micStream: MediaStream | null;
+  camVideo: RemoteVideoSlot | null;
+  screenVideo: RemoteVideoSlot | null;
+  micOn: boolean;
+  camOn: boolean;
+  screenOn: boolean;
+  poor: boolean;
+}
+
+/**
+ * Remove one participant's video slot (camera or screen): drop its native
+ * `ended` listener, null the slot and clear the matching on flag. It never
+ * stops a track, never detaches SDK elements, never touches the other source
+ * or audio, and never connects/disconnects a room. Repeated clears are
+ * harmless no-ops. Returns whether a slot was actually removed so callers can
+ * skip pointless version bumps.
+ */
+function clearPartVideo(part: Part, source: "camera" | "screen"): boolean {
+  const slot = source === "camera" ? part.camVideo : part.screenVideo;
+  if (!slot) return false;
+  slot.removeEndedListener();
+  if (source === "camera") {
+    part.camVideo = null;
+    part.camOn = true; // publication gone; snapshot masks it until a new one
+  } else {
+    part.screenVideo = null;
+    part.screenOn = false;
+  }
+  return true;
+}
+
+/**
+ * Opt-in call-video diagnostics (VITE_CALL_VIDEO_DEBUG=1). Default operation
+ * logs nothing: no call telemetry, no user names, tokens or room credentials.
+ */
+const callVideoDebug = (...args: unknown[]) => {
+  if (import.meta.env.VITE_CALL_VIDEO_DEBUG === "1") {
+    // eslint-disable-next-line no-console
+    console.debug("[call-video]", ...args);
+  }
+};
+
 export function useCallkit(token: string | null): GarmaCallkit {
   const [session, setSession] = useState<CallSession | null>(null);
   const [micOn, setMicOn] = useState(true);
@@ -371,17 +439,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   // A call can have several remote participants now (group calls), each with
   // their own mic/camera/screen tracks. Keyed by LiveKit identity (== user
   // id); a version tick re-renders the snapshot below after any mutation.
-  interface Part {
-    userId: string;
-    micEls: Set<HTMLAudioElement>;
-    micStream: MediaStream | null;
-    camStream: MediaStream | null;
-    screenStream: MediaStream | null;
-    micOn: boolean;
-    camOn: boolean;
-    screenOn: boolean;
-    poor: boolean;
-  }
+  // `Part` and the video slot helpers live at module scope (see above).
   const partsRef = useRef<Map<string, Part>>(new Map());
   const [partsTick, setPartsTick] = useState(0);
   const commitParts = useCallback(() => setPartsTick((t) => t + 1), []);
@@ -420,8 +478,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
         userId,
         micEls: new Set(),
         micStream: null,
-        camStream: null,
-        screenStream: null,
+        camVideo: null,
+        screenVideo: null,
         micOn: true,
         camOn: true,
         screenOn: false,
@@ -443,19 +501,22 @@ export function useCallkit(token: string | null): GarmaCallkit {
   }, [session]);
 
   /** Snapshot of live remote media for the overlay, ordered by joined peers.
-   *  Streams whose tracks have ended are masked to null: a remote track can
-   *  die (sharer closed the picker, their app was killed, SFU glitch) and the
+   *  Video whose browser track ended is masked to null: a remote track can die
+   *  (sharer closed the picker, their app was killed, SFU glitch) and the
    *  unsubscribe event can race/reconnect away — never hand the UI a frozen
-   *  or black stream to keep rendering. */
+   *  or black picture to keep rendering. The snapshot references the original
+   *  SDK object (no clone/spread): attachment relies on that identity. */
   const remotes: RemotePeer[] = useMemo(() => {
     const joined = partsRef.current;
     const out: RemotePeer[] = [];
     const liveOnly = (s: MediaStream | null): MediaStream | null =>
       s && s.getTracks().some((t) => t.readyState === "live") ? s : null;
+    const liveVideo = (slot: RemoteVideoSlot | null): RemoteVideoTrack | null =>
+      slot?.track.mediaStreamTrack.readyState === "live" ? slot.track : null;
     for (const [userId, part] of joined) {
       const meta = partNames.get(userId) ?? { displayName: "…", themeColor: "#8a6340" };
-      const cam = liveOnly(part.camStream);
-      const screen = liveOnly(part.screenStream);
+      const cam = liveVideo(part.camVideo);
+      const screen = liveVideo(part.screenVideo);
       const mic = liveOnly(part.micStream);
       out.push({
         userId,
@@ -465,8 +526,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
         cam,
         screen,
         micOn: part.micOn,
-        // A stream that died mid-call reads as "off" — a muted flag without
-        // a live track would show a camera-off badge over a black tile.
+        // A track that died mid-call reads as "off" — a mute flag without a
+        // usable SDK track would show a camera-off badge over a black tile.
         camOn: part.camOn && !!cam,
         screenOn: part.screenOn && !!screen,
         poor: part.poor,
@@ -602,6 +663,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
         el.remove();
       });
       part.micEls.clear();
+      clearPartVideo(part, "camera");
+      clearPartVideo(part, "screen");
     }
     partsRef.current.clear();
     commitParts();
@@ -985,44 +1048,103 @@ export function useCallkit(token: string | null): GarmaCallkit {
           const uid = participant?.identity ?? "?";
           const part = partOf(uid);
           if (publication.source === Track.Source.Microphone) {
+            // Remote voice keeps SDK attachment (unchanged): a dedicated
+            // element per person — video tiles stay muted so audio is never
+            // doubled/phasey.
             part.micStream = new MediaStream([track.mediaStreamTrack]);
             part.micOn = !publication.isMuted;
-            // Remote voice plays through a dedicated element (per person) —
-            // video tiles stay muted so audio is never doubled/phasey.
             const audio = track.attach() as HTMLAudioElement;
             audio.autoplay = true;
             audio.setAttribute("playsinline", "true");
             audio.volume = speakerOnRef.current ? 1 : 0;
             document.body.appendChild(audio);
             part.micEls.add(audio);
-          } else if (publication.source === Track.Source.Camera) {
-            part.camStream = new MediaStream([track.mediaStreamTrack]);
-            part.camOn = !publication.isMuted;
-          } else if (publication.source === Track.Source.ScreenShare) {
-            part.screenStream = new MediaStream([track.mediaStreamTrack]);
-            part.screenOn = true;
+          } else if (track instanceof LK.RemoteVideoTrack) {
+            // Remote VIDEO keeps the SDK RemoteVideoTrack itself — the
+            // renderer attaches it (adaptive reception only starts once the
+            // element observes it), so a constructed browser stream would
+            // break that. Camera and screen occupy separate slots; clearing
+            // one never disturbs the other or the microphone.
+            const source: "camera" | "screen" =
+              publication.source === Track.Source.ScreenShare ? "screen" : "camera";
+            const sid = publication.trackSid;
+            const prior = source === "camera" ? part.camVideo : part.screenVideo;
+            if (prior && prior.track === track && prior.publicationSid === sid) {
+              // Same publication re-delivered: reconcile the mute flag only,
+              // never stack a second ended listener or reset the slot.
+              if (source === "camera") part.camOn = !publication.isMuted;
+              else part.screenOn = !publication.isMuted;
+            } else {
+              // Replacement (A → B): release A's bookkeeping listener first so
+              // a stale ended event can never delete B; React disposes A's
+              // element attachment when it observes the new track.
+              if (prior) clearPartVideo(part, source);
+              const browserTrack = track.mediaStreamTrack;
+              const endedListener = () => {
+                // Old-room / stale events must never delete replacement media.
+                if (roomRef.current !== r) return;
+                const cur = partsRef.current.get(uid);
+                if (!cur || cur !== part) return;
+                const curSlot = source === "camera" ? cur.camVideo : cur.screenVideo;
+                if (!curSlot) return;
+                if (curSlot.track !== track || curSlot.publicationSid !== sid) return;
+                if (curSlot.track.mediaStreamTrack !== browserTrack) return;
+                if (clearPartVideo(cur, source)) commitParts();
+              };
+              const slot: RemoteVideoSlot = {
+                track,
+                publicationSid: sid,
+                removeEndedListener: () =>
+                  browserTrack.removeEventListener("ended", endedListener),
+              };
+              browserTrack.addEventListener("ended", endedListener);
+              if (source === "camera") {
+                part.camVideo = slot;
+                part.camOn = !publication.isMuted;
+              } else {
+                part.screenVideo = slot;
+                part.screenOn = !publication.isMuted;
+              }
+            }
+            callVideoDebug("remoteVideoSubscribed", { source, sid });
           }
           commitParts();
         });
         room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
           if (roomRef.current !== r) return;
           const uid = participant?.identity ?? "?";
-          const part = partOf(uid);
           if (publication.source === Track.Source.Microphone) {
+            const part = partOf(uid);
             track.detach().forEach((element) => {
               part.micEls.delete(element as HTMLAudioElement);
               element.remove();
             });
             part.micStream = null;
             part.micOn = true;
-          } else if (publication.source === Track.Source.Camera) {
-            part.camStream = null;
-            part.camOn = true;
-          } else if (publication.source === Track.Source.ScreenShare) {
-            part.screenStream = null;
-            part.screenOn = false;
+            commitParts();
+            return;
           }
-          commitParts();
+          // Video cleanup only ever clears a slot this event actually names
+          // (publication SID AND SDK track object): a replacement track can
+          // reuse a publication SID, so an unsubscribe for A must not erase B.
+          // A missing participant never creates a ghost video participant.
+          const part = partsRef.current.get(uid);
+          if (!part) return;
+          if (
+            publication.source === Track.Source.Camera &&
+            part.camVideo?.publicationSid === publication.trackSid &&
+            part.camVideo.track === track
+          ) {
+            clearPartVideo(part, "camera");
+            commitParts();
+          } else if (
+            publication.source === Track.Source.ScreenShare &&
+            part.screenVideo?.publicationSid === publication.trackSid &&
+            part.screenVideo.track === track
+          ) {
+            clearPartVideo(part, "screen");
+            commitParts();
+          }
         });
         // A REMOTE publication can disappear without a matching unsubscribe on
         // our side (the publisher stopped it before we ever subscribed, or
@@ -1046,11 +1168,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
             part.micStream = null;
             part.micOn = true;
           } else if (publication.source === Track.Source.Camera) {
-            part.camStream = null;
-            part.camOn = true;
+            // SID match only — publication.track may already be gone. An
+            // obsolete publication event must never clear a newer one.
+            if (part.camVideo?.publicationSid === publication.trackSid) {
+              clearPartVideo(part, "camera");
+            }
           } else if (publication.source === Track.Source.ScreenShare) {
-            part.screenStream = null;
-            part.screenOn = false;
+            if (part.screenVideo?.publicationSid === publication.trackSid) {
+              clearPartVideo(part, "screen");
+            }
           }
           commitParts();
         });
@@ -1069,6 +1195,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
             el.remove();
           });
           part.micEls.clear();
+          // Release both video slots (ended listeners) before the part goes.
+          clearPartVideo(part, "camera");
+          clearPartVideo(part, "screen");
           partsRef.current.delete(participant.identity);
           commitParts();
         });
@@ -1085,16 +1214,34 @@ export function useCallkit(token: string | null): GarmaCallkit {
           r.localParticipant.getTrackPublications().includes(publication);
         room.on(RoomEvent.TrackMuted, (publication, participant) => {
           if (roomRef.current !== r || isLocalPub(publication)) return;
-          const part = partOf(participant?.identity ?? "?");
-          if (publication.source === Track.Source.Camera) part.camOn = false;
-          else if (publication.source === Track.Source.Microphone) part.micOn = false;
+          const identity = participant?.identity ?? "?";
+          if (publication.source === Track.Source.Microphone) {
+            partOf(identity).micOn = false;
+          } else if (publication.source === Track.Source.Camera) {
+            // Match the publication SID occupying this source. Pre-subscription
+            // mute events name no slot yet — ignore them (subscription reads
+            // the publication's current mute state). The slot and its ended
+            // listener stay while muted so an unmute can show the same track.
+            const part = partsRef.current.get(identity);
+            if (part?.camVideo?.publicationSid === publication.trackSid) part.camOn = false;
+          } else if (publication.source === Track.Source.ScreenShare) {
+            const part = partsRef.current.get(identity);
+            if (part?.screenVideo?.publicationSid === publication.trackSid) part.screenOn = false;
+          }
           commitParts();
         });
         room.on(RoomEvent.TrackUnmuted, (publication, participant) => {
           if (roomRef.current !== r || isLocalPub(publication)) return;
-          const part = partOf(participant?.identity ?? "?");
-          if (publication.source === Track.Source.Camera) part.camOn = true;
-          else if (publication.source === Track.Source.Microphone) part.micOn = true;
+          const identity = participant?.identity ?? "?";
+          if (publication.source === Track.Source.Microphone) {
+            partOf(identity).micOn = true;
+          } else if (publication.source === Track.Source.Camera) {
+            const part = partsRef.current.get(identity);
+            if (part?.camVideo?.publicationSid === publication.trackSid) part.camOn = true;
+          } else if (publication.source === Track.Source.ScreenShare) {
+            const part = partsRef.current.get(identity);
+            if (part?.screenVideo?.publicationSid === publication.trackSid) part.screenOn = true;
+          }
           commitParts();
         });
         // LiveKit scores each remote participant's link to us — a poor
@@ -1136,8 +1283,8 @@ export function useCallkit(token: string | null): GarmaCallkit {
             });
             part.micEls.clear();
             part.micStream = null;
-            part.camStream = null;
-            part.screenStream = null;
+            clearPartVideo(part, "camera");
+            clearPartVideo(part, "screen");
           }
           commitParts();
           setScreenLocal(null);
@@ -1169,6 +1316,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
           45_000,
           "connect_timeout",
         );
+        callVideoDebug("roomConnected", { callId });
 
         try {
           await r.startAudio();
