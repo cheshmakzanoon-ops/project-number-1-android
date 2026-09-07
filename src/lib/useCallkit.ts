@@ -442,22 +442,33 @@ export function useCallkit(token: string | null): GarmaCallkit {
     return map;
   }, [session]);
 
-  /** Snapshot of live remote media for the overlay, ordered by joined peers. */
+  /** Snapshot of live remote media for the overlay, ordered by joined peers.
+   *  Streams whose tracks have ended are masked to null: a remote track can
+   *  die (sharer closed the picker, their app was killed, SFU glitch) and the
+   *  unsubscribe event can race/reconnect away — never hand the UI a frozen
+   *  or black stream to keep rendering. */
   const remotes: RemotePeer[] = useMemo(() => {
     const joined = partsRef.current;
     const out: RemotePeer[] = [];
+    const liveOnly = (s: MediaStream | null): MediaStream | null =>
+      s && s.getTracks().some((t) => t.readyState === "live") ? s : null;
     for (const [userId, part] of joined) {
       const meta = partNames.get(userId) ?? { displayName: "…", themeColor: "#8a6340" };
+      const cam = liveOnly(part.camStream);
+      const screen = liveOnly(part.screenStream);
+      const mic = liveOnly(part.micStream);
       out.push({
         userId,
         displayName: meta.displayName,
         themeColor: meta.themeColor,
-        mic: part.micStream,
-        cam: part.camStream,
-        screen: part.screenStream,
+        mic,
+        cam,
+        screen,
         micOn: part.micOn,
-        camOn: part.camOn,
-        screenOn: part.screenOn,
+        // A stream that died mid-call reads as "off" — a muted flag without
+        // a live track would show a camera-off badge over a black tile.
+        camOn: part.camOn && !!cam,
+        screenOn: part.screenOn && !!screen,
         poor: part.poor,
       });
     }
@@ -1011,6 +1022,62 @@ export function useCallkit(token: string | null): GarmaCallkit {
             part.screenStream = null;
             part.screenOn = false;
           }
+          commitParts();
+        });
+        // A REMOTE publication can disappear without a matching unsubscribe on
+        // our side (the publisher stopped it before we ever subscribed, or
+        // LiveKit removed it during a reconnect reconcile). TrackUnpublished
+        // fires for every remote unpublish — treat it as the authoritative
+        // "gone" signal so a stopped screen share/camera can never leave a
+        // stale (frozen-frame) stream behind on this screen. This is what
+        // keeps the share tile honest when the sharer hits "پایان اشتراک".
+        room.on(RoomEvent.TrackUnpublished, (publication, participant) => {
+          if (roomRef.current !== r) return;
+          const uid = participant.identity;
+          const part = partsRef.current.get(uid);
+          if (!part) return; // never subscribed → nothing to clean
+          if (publication.source === Track.Source.Microphone) {
+            part.micEls.forEach((el) => {
+              el.pause();
+              el.srcObject = null;
+              el.remove();
+            });
+            part.micEls.clear();
+            part.micStream = null;
+            part.micOn = true;
+          } else if (publication.source === Track.Source.Camera) {
+            part.camStream = null;
+            part.camOn = true;
+          } else if (publication.source === Track.Source.ScreenShare) {
+            part.screenStream = null;
+            part.screenOn = false;
+          }
+          commitParts();
+        });
+        // A remote participant left the room (hung up, app killed, network
+        // drop that outlived their retries): drop their media part entirely so
+        // the UI never keeps rendering a "در تماس" participant or a leftover
+        // tile for someone who is gone. If they come back (rejoin), a fresh
+        // ParticipantConnected + TrackSubscribed rebuilds the part from zero.
+        room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+          if (roomRef.current !== r) return;
+          const part = partsRef.current.get(participant.identity);
+          if (!part) return;
+          part.micEls.forEach((el) => {
+            el.pause();
+            el.srcObject = null;
+            el.remove();
+          });
+          part.micEls.clear();
+          partsRef.current.delete(participant.identity);
+          commitParts();
+        });
+        room.on(RoomEvent.ParticipantConnected, (participant) => {
+          if (roomRef.current !== r) return;
+          // Ensure the participant has a part the moment they enter the media
+          // room (a late joiner who has not published anything yet still has a
+          // row for the overlay's participant list).
+          partOf(participant.identity);
           commitParts();
         });
         // Only remote track mutes matter here.

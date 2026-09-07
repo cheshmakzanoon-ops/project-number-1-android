@@ -467,7 +467,14 @@ export function CallOverlay({
                       <Avatar name={peer.displayName} color={peer.themeColor} size={38} />
                       <span className="min-w-0 flex-1 truncate text-sm font-bold">{peer.displayName}</span>
                       <span className="flex items-center gap-1 text-[11px] text-white/55">
-                        {muted ? (
+                        {!live ? (
+                          // Joined on the server but no media part yet (still
+                          // connecting, or just left): never paint a green
+                          // "در تماس" for someone whose stream is not live.
+                          <>
+                            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-white/40" /> در حال اتصال…
+                          </>
+                        ) : muted ? (
                           <>
                             <MicOff size={13} className="text-rose-300" /> بی‌صدا
                           </>
@@ -528,7 +535,13 @@ function VideoStage({
     const live = kit.remotes.find((r) => r.userId === peer.userId);
     return Boolean(live && (live.cam || live.screen));
   });
-  const gridMode = videoSources.length > 1 || joinedPeers.length > 2;
+  // Grid whenever more than one OTHER person is on the call. The old
+  // video-count-only rule let a 3-way call where one remote has their camera
+  // off drop that participant off the screen entirely (spotlight showed only
+  // the one live video, and the audio-only family member vanished). In a
+  // grid everyone gets a tile — live video or a name tile — and my own
+  // preview/screen joins it.
+  const gridMode = joinedPeers.length > 1;
 
   if (!gridMode && videoSources.length === 1 && joinedPeers.length <= 2) {
     // Spotlight: one remote person, camera or screen share fills the screen.
