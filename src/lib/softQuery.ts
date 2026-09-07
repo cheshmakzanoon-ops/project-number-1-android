@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQueries } from "convex/react";
-import type { FunctionReference } from "convex/server";
+import { getFunctionName, type FunctionReference } from "convex/server";
 
 export type PublicQuery = FunctionReference<"query", "public", any, any>;
 
@@ -23,12 +23,23 @@ export function useSoftQuery(
   query: PublicQuery,
   args: Record<string, unknown> | "skip",
 ): { data: unknown; unavailable: boolean } {
+  // `api.users.me` and friends (the generated `api` object, backed by
+  // `anyApi`) are PROXIES that materialize a brand-new reference on every
+  // property access — the `query` argument therefore has a different object
+  // identity on every render. Memoizing on that raw object would rebuild
+  // `queries` every render, which re-creates the convex subscription every
+  // render, which makes convex/react's useSubscription call setState during
+  // render on every render — React's nested-update guard then throws "Too
+  // many re-renders" the first time any screen re-renders after mount
+  // (i.e. as soon as a query answers). Key the memo on the resolved function
+  // NAME instead (stable across renders, identical semantics to how
+  // convex/react's own useQuery dedupes); args are compared structurally
+  // (JSON), never by reference.
+  const queryName = getFunctionName(query);
   const queries = useMemo(
     () => (args === "skip" ? {} : { q: { query, args } }),
-    // Same identity semantics as convex/react's own useQuery: args are
-    // compared structurally (JSON), never by reference.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [query, args === "skip" ? "skip" : JSON.stringify(args)],
+    [queryName, args === "skip" ? "skip" : JSON.stringify(args)],
   );
   const results = useQueries(queries as never) as Record<string, unknown>;
   const value = results.q;
