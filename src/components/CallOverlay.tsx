@@ -353,7 +353,13 @@ export function CallOverlay({
           <div className="mt-14 flex items-center gap-10">
             {incoming ? (
               <>
-                <ColAction label="رد کردن" tone="rose" onClick={kit.decline} disabled={busy}>
+                <ColAction
+                  label="رد کردن"
+                  tone="rose"
+                  onClick={kit.decline}
+                  // CANCELLATION AVAILABILITY: decline stays tappable while
+                  // accept is connecting; the hook drops duplicate taps.
+                >
                   <PhoneOff size={26} style={{ transform: "scaleX(-1)" }} />
                 </ColAction>
                 <ColAction
@@ -366,7 +372,13 @@ export function CallOverlay({
                 </ColAction>
               </>
             ) : (
-              <ColAction label={busy ? "در حال قطع…" : "قطع کردن"} tone="rose" onClick={kit.hangup} disabled={busy}>
+              <ColAction
+                label={busy ? "در حال قطع…" : "قطع کردن"}
+                tone="rose"
+                onClick={kit.hangup}
+                // CANCELLATION AVAILABILITY: hangup stays tappable while the
+                // outgoing call is connecting; the hook drops duplicate taps.
+              >
                 <PhoneOff size={26} style={{ transform: "scaleX(-1)" }} />
               </ColAction>
             )}
@@ -505,7 +517,8 @@ export function CallOverlay({
             </div>
             <button
               onClick={kit.hangup}
-              disabled={busy}
+              // CANCELLATION AVAILABILITY: the red button never locks out —
+              // ending a call must always be possible (hook drops dupes).
               aria-label="پایان تماس"
               className={`grid shrink-0 place-items-center rounded-full text-white shadow-lg shadow-rose-500/40 transition ${
                 busy ? "cursor-wait opacity-60" : "bg-rose-500 hover:bg-rose-600 active:scale-90"

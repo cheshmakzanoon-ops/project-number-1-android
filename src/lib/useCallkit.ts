@@ -320,19 +320,30 @@ function saveCamMode(m: CamMode) {
   }
 }
 
-/** Reject after `ms` so a hung getUserMedia/connect can never wedge the UI. */
+/**
+ * Reject after `ms` so a hung getUserMedia/connect can never wedge the UI.
+ *
+ * Cancellation-safe: rejecting the returned promise cannot stop the work that
+ * still holds `p` (a getUserMedia capture, a room connect…), so a timeout must
+ * not be presented as the work's real failure — the caller decides. The
+ * settled flag also makes late results inert: when both the timeout and the
+ * underlying promise settle in the same tick, only the first outcome wins
+ * instead of the timer's rejection overwriting a success (or vice versa).
+ */
 function withTimeout<T>(p: Promise<T>, ms: number, label = "timeout"): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const t = window.setTimeout(() => reject(new Error(label)), ms);
+    let settled = false;
+    const finish = (ok: boolean, v: T | Error) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(t);
+      if (ok) resolve(v as T);
+      else reject(v as Error);
+    };
+    const t = window.setTimeout(() => finish(false, new Error(label)), ms);
     p.then(
-      (v) => {
-        window.clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        window.clearTimeout(t);
-        reject(e);
-      },
+      (v) => finish(true, v),
+      (e) => finish(false, e instanceof Error ? e : new Error(String(e))),
     );
   });
 }
@@ -425,6 +436,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const roomRef = useRef<Room | null>(null);
   const lastCamIdRef = useRef<string>("");
   const busyRef = useRef(false);
+  /**
+   * An end (hangup/decline) is in flight. Busy no longer blocks the end
+   * button during a connect (see accept/decline/hangup): cancellation must
+   * stay available while the media connection is being established — a
+   * WhatsApp-style ring screen is cancellable at every instant. This ref
+   * makes that second tap a no-op for a moment that is already ending
+   * instead of a silent ignored tap.
+   */
+  const endingRef = useRef(false);
   const shareBusyRef = useRef(false);
   const sawCallRef = useRef(false);
   const ringRef = useRef<AudioContext | null>(null);
@@ -610,11 +630,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
         mediaDeniedRef.current = true;
         return;
       }
-      const stream = await withTimeout(
-        navigator.mediaDevices.getUserMedia({ audio: true, video: kind === "video" }),
-        10_000,
-        "prime_timeout",
+      const gUM = navigator.mediaDevices.getUserMedia({ audio: true, video: kind === "video" });
+      // CANCELLATION-SAFE WARM-UP: withTimeout can abandon a getUserMedia that
+      // is still running (permission prompt / slow camera on some Androids).
+      // The abandoned promise stays pending with no owner, so a stream that
+      // resolves AFTER we gave up would leave a live capture driver behind —
+      // the green dot / LED stays on with no call. This side-handler is the
+      // late result's owner: it stops the tracks whenever the main await no
+      // longer needs them (timeout, hangup race, error). The real connect
+      // below always opens its own fresh capture, so stopping here is safe.
+      gUM.then(
+        (stream) => stream.getTracks().forEach((t) => t.stop()),
+        () => {},
       );
+      const stream = await withTimeout(gUM, 10_000, "prime_timeout");
       stream.getTracks().forEach((t) => t.stop());
     } catch (e) {
       // Remember a refusal (user denied, or the embedding page withholds the
@@ -671,6 +700,38 @@ export function useCallkit(token: string | null): GarmaCallkit {
     clearRingTtl();
     clearQualityWatch();
     const room = roomRef.current;
+    // ---- END-OF-CALL LOCAL-MEDIA OWNERSHIP ----
+    // Teardown is where this device's captured media dies. The room's
+    // publication map is the single truthful inventory of every local track
+    // that was captured (mic, camera, screen share; live, muted, or
+    // mid-swap): primeMedia never keeps tracks, and a capture made inside
+    // LiveKit's own publish calls is registered there the moment it exists.
+    // A clean disconnect already stops what it holds, but hangup DURING a
+    // reconnect/publish that is still in flight leaves the capture driver
+    // running — the mic keeps listening, the camera LED stays on, the share
+    // track is orphaned. So the map is swept explicitly here, BEFORE the
+    // disconnect below; stopping an already-ended track is a no-op.
+    if (room) {
+      try {
+        for (const pub of room.localParticipant.trackPublications.values()) {
+          const t = pub.track?.mediaStreamTrack;
+          if (t && t.readyState !== "ended") {
+            try {
+              t.stop();
+            } catch {
+              /* noop */
+            }
+          }
+        }
+      } catch {
+        /* a torn-down room no longer owns anything to release */
+      }
+    }
+    // 3) The connection itself, last. A connect() that has not resolved yet
+    //    still belongs to this call until it does: nulling roomRef FIRST
+    //    makes every handler's `roomRef.current !== r` guard inert, so the
+    //    disconnect below cannot fire Disconnected at a live handler and
+    //    schedule a reconnect for a call the user just ended.
     if (room) {
       roomRef.current = null;
       try {
@@ -788,7 +849,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
     }
   }, [stopRing]);
 
-  useEffect(() => () => stopRing(), [stopRing]);
+  // Unmounting a screen that still owns a call must release EVERYTHING the
+  // way hangup does — not only the ring. Before this, an unmount mid-ring or
+  // mid-call left the ring tone, vibration, the LiveKit room and this
+  // device's captured mic/camera/screen running with no UI to stop them:
+  // exactly the "app closed but the green dot / LED stayed on" bug.
+  // cleanup() = teardown() + stopRing(); it is idempotent, so the extra
+  // call from decline/hangup costs nothing.
+  useEffect(() => () => cleanup(), [cleanup]);
 
   /**
    * (Re)capture and publish the camera at a given tier. Used for the initial
@@ -851,6 +919,21 @@ export function useCallkit(token: string | null): GarmaCallkit {
           if (!lastCamIdRef.current) throw err;
           lastCamIdRef.current = "";
           await attempt();
+        }
+        // END-OF-CALL OWNERSHIP (capture side): the user may have hung up
+        // while the getUserMedia above was still opening (teardown's
+        // publication sweep ran BEFORE this fresh capture was registered).
+        // A capture that lands on a room this screen no longer owns must be
+        // stopped here, or the camera driver stays on with no call behind it.
+        if (roomRef.current !== room) {
+          try {
+            const orphan = room.localParticipant.getTrackPublication(Track.Source.Camera);
+            const t = orphan?.track?.mediaStreamTrack;
+            if (t && t.readyState !== "ended") t.stop();
+          } catch {
+            /* noop */
+          }
+          return false;
         }
         // Remember which physical camera is actually live so a later
         // re-capture (unmute, tier change) never silently reverts to the
@@ -1750,6 +1833,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
           }, CALLER_RING_TTL);
         }
         const res = await connectMedia(callId, kind);
+        // CANCELLATION RECHECK: the caller may hang up while this connect
+        // is still running; only the live session for ITS OWN call may act.
+        if (sessionRef.current?.callId !== callId) return;
         if (res === true) return; // media live; the effect flips phase on answer
         if (res === "unauthorized" || res === "livekit_not_configured") {
           setError(res);
@@ -1789,6 +1875,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
     setBusy(true);
     try {
       await primeMedia(s.kind);
+      // LATE-RESULT GUARD: primeMedia can sit on a permission prompt for
+      // its whole 10s budget while the user taps the red button. Answering
+      // after that would flip the call to "active" on the server with
+      // nobody present - a ghost call still ringing on the peer's side.
+      // Stand down here; hangup's own cleanup already stopped the ring
+      // and closed the notification.
+      if (sessionRef.current?.callId !== s.callId) return; // cancelled mid-prime
       stopRing();
       clearRingTtl();
       void closeCallNotification(s.callId);
@@ -1813,7 +1906,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
             ? { ...prev, phase: "active", joinOffer: false }
             : prev,
         );
+      // CANCELLATION GUARD: hangup/decline may now run while connectMedia is
+      // still awaited. cleanup() nulls sessionRef, and the room-ref identity
+      // guard keeps the media itself from being adopted, but ONLY this
+      // re-check stops the RESULT from acting on a call the user already
+      // cancelled: without it, a slow connect resolving after the red
+      // button was tapped would re-activate the session (the overlay comes
+      // back), schedule retries, and look like a call that refuses to die.
+      if (sessionRef.current?.callId !== s.callId) return; // cancelled mid-connect
       const res = await connectMedia(s.callId, s.kind);
+      // CANCELLATION RECHECK: the connect above can settle AFTER the user
+      // tapped the red button (the unblock above made that tap possible).
+      // cleanup() has already run in that case — sessionRef is null — so
+      // acting on the result would resurrect a cancelled call.
+      if (sessionRef.current?.callId !== s.callId) return;
       if (res === true) {
         activate();
       } else if (res === "unauthorized" || res === "livekit_not_configured") {
@@ -1846,10 +1952,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
   ]);
 
   const decline = useCallback(async () => {
-    if (busyRef.current) return;
+    // CANCELLATION AVAILABILITY: busy no longer blocks the end button. The
+    // accept path can hold busy for many seconds (primeMedia + the media
+    // connect); the red button must still work at every instant of that
+    // window -- a call is cancellable before it starts, exactly like an
+    // active one. A second tap while already ending is dropped here.
+    if (endingRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
     busyRef.current = true;
+    endingRef.current = true;
     setBusy(true);
     try {
       stopRing();
@@ -1862,16 +1974,23 @@ export function useCallkit(token: string | null): GarmaCallkit {
       }
       cleanup();
     } finally {
+      endingRef.current = false;
       busyRef.current = false;
       setBusy(false);
     }
   }, [cleanup, endCallMut, stopRing, token]);
 
   const hangup = useCallback(async () => {
-    if (busyRef.current) return;
+    // CANCELLATION AVAILABILITY: busy no longer blocks the end button. The
+    // accept path can hold busy for many seconds (primeMedia + the media
+    // connect); the red button must still work at every instant of that
+    // window -- a call is cancellable before it starts, exactly like an
+    // active one. A second tap while already ending is dropped here.
+    if (endingRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
     busyRef.current = true;
+    endingRef.current = true;
     setBusy(true);
     try {
       stopRing();
@@ -1885,6 +2004,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
       }
       cleanup();
     } finally {
+      endingRef.current = false;
       busyRef.current = false;
       setBusy(false);
     }
