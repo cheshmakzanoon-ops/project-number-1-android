@@ -5,6 +5,21 @@ import { useAction, useMutation } from "convex/react";
 import type { LocalVideoTrack, RemoteVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
 import { IS_EMBEDDED, IS_IOS, IS_PHONE } from "./browser";
+import {
+  cancelOp,
+  classifyConnectError,
+  createOp,
+  createOwner,
+  deadline,
+  opCurrent,
+  safeDisconnect,
+  safeStopTrack,
+  TimerRegistry,
+  withTimeout,
+  type CallOwner,
+  type ConnectResult,
+  type OpHandle,
+} from "./callLifecycle";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "./softQuery";
 import type { Id } from "../convex/_generated/dataModel";
@@ -166,13 +181,8 @@ function callerOf(call: CallRow): { userId: Id<"users">; displayName: string; th
   return null;
 }
 
-/**
- * Result of a media-connect attempt:
- * - true: connected, media publishing.
- * - "retryable": transient failure (timeout, dead link) — retry in background.
- * - "unauthorized" / "livekit_not_configured": permanent — give up.
- */
-type ConnectResult = true | "retryable" | "unauthorized" | "livekit_not_configured";
+// ConnectResult (including "cancelled") and withTimeout/deadline live in
+// ./callLifecycle — the single ownership model every async call op shares.
 
 /** A human-readable Persian explanation for a failed camera start. */
 function camFailureMessage(denied: boolean): string {
@@ -321,34 +331,6 @@ function saveCamMode(m: CamMode) {
 }
 
 /**
- * Reject after `ms` so a hung getUserMedia/connect can never wedge the UI.
- *
- * Cancellation-safe: rejecting the returned promise cannot stop the work that
- * still holds `p` (a getUserMedia capture, a room connect…), so a timeout must
- * not be presented as the work's real failure — the caller decides. The
- * settled flag also makes late results inert: when both the timeout and the
- * underlying promise settle in the same tick, only the first outcome wins
- * instead of the timer's rejection overwriting a success (or vice versa).
- */
-function withTimeout<T>(p: Promise<T>, ms: number, label = "timeout"): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const finish = (ok: boolean, v: T | Error) => {
-      if (settled) return;
-      settled = true;
-      window.clearTimeout(t);
-      if (ok) resolve(v as T);
-      else reject(v as Error);
-    };
-    const t = window.setTimeout(() => finish(false, new Error(label)), ms);
-    p.then(
-      (v) => finish(true, v),
-      (e) => finish(false, e instanceof Error ? e : new Error(String(e))),
-    );
-  });
-}
-
-/**
  * One remote video source (camera or screen) of a participant: the SDK
  * `RemoteVideoTrack` currently occupying that slot plus bookkeeping to
  * release it. Disposal never stops the track, never detaches every SDK
@@ -446,10 +428,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
    */
   const endingRef = useRef(false);
   const shareBusyRef = useRef(false);
+  const micBusyRef = useRef(false);
   const sawCallRef = useRef(false);
   const ringRef = useRef<AudioContext | null>(null);
   const ringTimerRef = useRef<number | null>(null);
   const ringVibrateTimerRef = useRef<number | null>(null);
+  /** Owner-scoped timers of the ring (incl. the 2s tone-decay timeout):
+   *  teardown clears ALL of them at once; a decay timeout can never fire into
+   *  a closed AudioContext, and stopRing cannot clear a newer ring's timers. */
+  const ringTimersRef = useRef<TimerRegistry>(new TimerRegistry());
   const sessionRef = useRef<CallSession | null>(null);
   useEffect(() => {
     sessionRef.current = session;
@@ -592,6 +579,19 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const connectGenRef = useRef(0); // bumped on teardown → invalidates retries
   const connectTimerRef = useRef<number | null>(null);
   const connRetryDelayRef = useRef(1500);
+  // ---- Ownership model (src/lib/callLifecycle.ts) ----
+  // One CallOwner per local call lifecycle. Teardown disposes it
+  // SYNCHRONOUSLY, so every async operation holding its handle can see —
+  // the moment it resolves — that the call it belonged to is over, without
+  // guessing from session state.
+  const ownerRef = useRef<CallOwner | null>(null);
+  /** The one current operation of each kind inside the live lifecycle. */
+  const opRefs = useRef<Record<"connect" | "camera" | "share" | "switch", OpHandle | null>>({
+    connect: null,
+    camera: null,
+    share: null,
+    switch: null,
+  });
   const connectMediaRef = useRef<
     (callId: Id<"calls">, kind: CallKind, opts?: { restoreState?: boolean }) => Promise<ConnectResult>
   >(async () => "retryable");
@@ -684,6 +684,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
       window.clearTimeout(connectTimerRef.current);
       connectTimerRef.current = null;
     }
+    // ---- OWNER DISPOSAL (synchronous, first) ----
+    // From here on, EVERY in-flight operation of this lifecycle (connect,
+    // camera capture, screen share, camera switch, pending retries) observes
+    // ownerRef.disposed === true when it resolves and must dispose of its own
+    // resources without touching anything a NEWER lifecycle owns. Cancelling
+    // the current op handles also marks superseded attempts so their results
+    // are classified "cancelled", not retried and never shown as errors.
+    const owner = ownerRef.current;
+    if (owner) owner.disposed = true;
+    for (const key of ["connect", "camera", "share", "switch"] as const) {
+      cancelOp(opRefs.current[key]);
+      opRefs.current[key] = null;
+    }
+    ownerRef.current = null;
     connRetryDelayRef.current = 1500;
     for (const part of partsRef.current.values()) {
       part.micEls.forEach((el) => {
@@ -733,12 +747,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
     //    disconnect below cannot fire Disconnected at a live handler and
     //    schedule a reconnect for a call the user just ended.
     if (room) {
+      // Null roomRef FIRST so every handler's `roomRef.current !== r` guard
+      // goes inert before the disconnect can fire Disconnected at them; then
+      // disconnect through safeDisconnect, which also absorbs a synchronous
+      // throw and the rejected-promise edge so disposal can never throw into
+      // the caller (or leave an unhandled rejection).
       roomRef.current = null;
-      try {
-        room.disconnect();
-      } catch {
-        /* noop */
-      }
+      safeDisconnect(room);
     }
     lastCamIdRef.current = "";
     setLocal(null);
@@ -771,6 +786,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
       window.clearInterval(ringVibrateTimerRef.current);
       ringVibrateTimerRef.current = null;
     }
+    // The registry holds the tone-decay timeouts (and any other ring-scoped
+    // timer); clearing everything here means a decay callback can never run
+    // against a closed AudioContext.
+    ringTimersRef.current.clearAll();
     try {
       navigator.vibrate?.(0);
     } catch {
@@ -829,7 +848,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
       const tone = () => {
         ensureRunning();
         gain.gain.setTargetAtTime(0.22, ctx.currentTime, 0.02);
-        window.setTimeout(() => {
+        // Registered on the ring's own registry: stopRing()/cleanup() clears
+        // it, so the decay can never land on an already-closed context.
+        ringTimersRef.current.setTimeout(() => {
           gain.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
         }, 2000);
       };
@@ -861,6 +882,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
   /**
    * (Re)capture and publish the camera at a given tier. Used for the initial
    * publish, network upgrades/downgrades, congestion stepping and manual caps.
+   *
+   * LATE-RESULT OWNERSHIP: the capture is bounded with `deadline`, not
+   * `withTimeout` — a getUserMedia that resolves after its deadline keeps
+   * running in the browser, so its eventual result MUST be observed and
+   * released (track stopped) instead of leaking a live capture. A capture
+   * that resolves on a lifecycle that was already disposed (hangup during
+   * the capture) is stopped here too.
    */
   const captureCameraAt = useCallback(
     async (tier: number, opts?: { enable?: boolean; force?: boolean }): Promise<boolean> => {
@@ -878,6 +906,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
         captureTierRef.current = tier;
         return false;
       }
+      // Adopt (or supersede) the current camera op of THIS lifecycle.
+      const owner = ownerRef.current ?? createOwner(sessionRef.current?.callId ?? null, sessionRef.current?.kind ?? "audio");
+      if (!ownerRef.current) ownerRef.current = owner;
+      const priorCamOp = opRefs.current.camera;
+      if (priorCamOp) cancelOp(priorCamOp);
+      const op = createOp(owner, "camera");
+      opRefs.current.camera = op;
       tierBusyRef.current = true;
       try {
         const existing = room.localParticipant.getTrackPublication(Track.Source.Camera);
@@ -894,10 +929,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
             /* the fresh publish below will fail visibly if the camera stuck */
           }
         }
-        // Bound the capture: a getUserMedia/publish that hangs (some Android
-        // Chrome builds) must never wedge the camera controls forever.
-        const attempt = (deviceId?: string) =>
-          withTimeout(
+        // Bound the capture WITHOUT abandoning it: a getUserMedia/publish that
+        // hangs (some Android Chrome builds) must never wedge the camera
+        // controls forever, and its late result must still be released.
+        const attempt = (deviceId?: string) => {
+          const bounded = deadline(
             room.localParticipant.setCameraEnabled(
               true,
               {
@@ -910,6 +946,38 @@ export function useCallkit(token: string | null): GarmaCallkit {
             15_000,
             "cam_capture_timeout",
           );
+          // THE LATE HANDLER: whatever the capture eventually produces is
+          // released here if the deadline already fired. OWNERSHIP RULE: an
+          // obsolete op disposes of ITS OWN resource only — the late capture
+          // track it produced is stopped, but the ROOM is never disconnected
+          // from here: by the time a slow capture lands, the room may already
+          // be serving a newer capture (tier change, switch) or a newer
+          // lifecycle (hangup + new call), and killing it would end a live
+          // call. (When the capture wins the race, `late` reports
+          // { late: false } and this handler is inert.)
+          void bounded.late.then((r) => {
+            if (!r.late) return;
+            const latePub = r.value as { track?: { mediaStreamTrack?: MediaStreamTrack } } | null | undefined;
+            if (latePub?.track?.mediaStreamTrack) {
+              safeStopTrack(latePub.track.mediaStreamTrack);
+              return;
+            }
+            // No publication object arrived: the capture resolved inside
+            // LiveKit's publish path, so the only trace is the camera source
+            // of the room this attempt targeted. Sweep THAT (old) room's
+            // camera source when this op no longer owns the camera slot —
+            // never roomRef and never a disconnect.
+            if (!opCurrent(op, opRefs.current.camera)) {
+              try {
+                const orphan = room.localParticipant.getTrackPublication(Track.Source.Camera);
+                safeStopTrack(orphan?.track?.mediaStreamTrack);
+              } catch {
+                /* noop */
+              }
+            }
+          });
+          return bounded.result;
+        };
         try {
           await attempt(lastCamIdRef.current || undefined);
         } catch (err) {
@@ -920,16 +988,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
           lastCamIdRef.current = "";
           await attempt();
         }
-        // END-OF-CALL OWNERSHIP (capture side): the user may have hung up
-        // while the getUserMedia above was still opening (teardown's
-        // publication sweep ran BEFORE this fresh capture was registered).
-        // A capture that lands on a room this screen no longer owns must be
-        // stopped here, or the camera driver stays on with no call behind it.
-        if (roomRef.current !== room) {
+        // OWNER GUARD: the user may have hung up while the getUserMedia above
+        // was still opening (teardown's publication sweep ran BEFORE this
+        // fresh capture was registered), or a newer capture may have
+        // superseded this one. An obsolete/op-owned-no-more result stops the
+        // capture it produced and never touches the room's live state.
+        if (!opCurrent(op, opRefs.current.camera)) {
           try {
             const orphan = room.localParticipant.getTrackPublication(Track.Source.Camera);
-            const t = orphan?.track?.mediaStreamTrack;
-            if (t && t.readyState !== "ended") t.stop();
+            safeStopTrack(orphan?.track?.mediaStreamTrack);
           } catch {
             /* noop */
           }
@@ -1018,6 +1085,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
             restoreState: s.phase === "active",
           });
           if (connectGenRef.current !== gen) return; // torn down mid-attempt
+          // A cancelled connect (hangup / superseded attempt) is not a
+          // failure: no retry, no error — the lifecycle that owned it is gone.
+          if (res === "cancelled") return;
           if (res === true) {
             connRetryDelayRef.current = 1500;
             setReconnecting(false);
@@ -1056,6 +1126,17 @@ export function useCallkit(token: string | null): GarmaCallkit {
       opts?: { restoreState?: boolean },
     ): Promise<ConnectResult> => {
       if (!token) return "retryable";
+      // OWNER / OP ADOPTION: this connect attempt belongs to the live call
+      // lifecycle (creating the owner the first time if the lifecycle is
+      // being adopted lazily from a resume path). A prior connect op of the
+      // SAME lifecycle is superseded and marked cancelled, so its eventual
+      // result can never act on, or retry for, the call again.
+      const owner = ownerRef.current ?? createOwner(callId, kind);
+      if (!ownerRef.current) ownerRef.current = owner;
+      const priorConnectOp = opRefs.current.connect;
+      if (priorConnectOp) cancelOp(priorConnectOp);
+      const op = createOp(owner, "connect");
+      opRefs.current.connect = op;
       const LK = await loadLiveKit();
       const { Room, RoomEvent, Track, ConnectionQuality, ConnectionState } = LK;
       const liveRoom = roomRef.current;
@@ -1067,6 +1148,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
           20_000,
           "token_timeout",
         );
+        // The lifecycle can end while the token action is in flight; an owner
+        // that died mid-token must not open a room behind the hangup.
+        if (owner.disposed) return "cancelled";
         const startTier = opts?.restoreState ? captureTierRef.current : desiredTier();
         captureTierRef.current = startTier;
         setCamQuality(CAM_TIERS[startTier].label);
@@ -1407,14 +1491,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
           /* noop */
         }
 
-        if (sessionRef.current?.callId !== callId) {
-          try {
-            r.disconnect();
-          } catch {
-            /* noop */
-          }
+        if (sessionRef.current?.callId !== callId || owner.disposed || op.cancelled) {
+          safeDisconnect(r);
           if (roomRef.current === r) roomRef.current = null;
-          return "retryable";
+          return "cancelled";
         }
 
         const restore = opts?.restoreState === true;
@@ -1509,14 +1589,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
       } catch (e) {
         clearQualityWatch();
         if (room && roomRef.current === room) roomRef.current = null;
-        try {
-          room?.disconnect();
-        } catch {
-          /* noop */
-        }
-        const msg = e instanceof Error ? e.message : "";
-        if (msg === "livekit_not_configured" || msg === "unauthorized") return msg;
-        return "retryable";
+        safeDisconnect(room);
+        // CANCELLED ≠ FAILED: a hangup (disposed owner) or a superseded
+        // attempt (cancelled op) is intentional cancellation, not a transient
+        // failure — reporting it as "retryable" would schedule reconnects
+        // (or surface an error toast) for a call the user already ended.
+        if (owner.disposed || op.cancelled) return "cancelled";
+        return classifyConnectError(e);
       }
     },
     [
@@ -1549,6 +1628,9 @@ export function useCallkit(token: string | null): GarmaCallkit {
         const res = await connectMediaRef.current(call.callId, call.kind, {
           restoreState: phase === "active",
         });
+        // A cancelled connect (hangup while the resume was connecting) is not
+        // a failure and must not schedule retries or errors.
+        if (res === "cancelled") return; // user moved on meanwhile
         const s = sessionRef.current;
         if (!s || s.callId !== call.callId) return; // user moved on meanwhile
         if (res === true) {
@@ -1836,6 +1918,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
         // CANCELLATION RECHECK: the caller may hang up while this connect
         // is still running; only the live session for ITS OWN call may act.
         if (sessionRef.current?.callId !== callId) return;
+        if (res === "cancelled") return; // hung up / superseded mid-connect
         if (res === true) return; // media live; the effect flips phase on answer
         if (res === "unauthorized" || res === "livekit_not_configured") {
           setError(res);
@@ -1920,6 +2003,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
       // cleanup() has already run in that case — sessionRef is null — so
       // acting on the result would resurrect a cancelled call.
       if (sessionRef.current?.callId !== s.callId) return;
+      if (res === "cancelled") return; // hung up / superseded mid-connect
       if (res === true) {
         activate();
       } else if (res === "unauthorized" || res === "livekit_not_configured") {
@@ -1967,12 +2051,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
       stopRing();
       void closeCallNotification(s.callId);
       leaveRef.current = { callId: s.callId, wanted: "declined" };
+      // DISPOSE FIRST: the red button ends THIS device's participation the
+      // instant it is pressed — ring, room, captured mic/camera/screen all
+      // die now, not after a (possibly hung or offline) server round-trip.
+      // The leaveRef retry loop guarantees the server row still converges.
+      cleanup();
       try {
         await endCallMut({ callId: s.callId, token, status: "declined" });
       } catch {
-        /* noop */
+        /* leaveRef retries when connectivity returns */
       }
-      cleanup();
     } finally {
       endingRef.current = false;
       busyRef.current = false;
@@ -1997,12 +2085,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
       void closeCallNotification(s.callId);
       const wasActive = s.phase === "active";
       leaveRef.current = { callId: s.callId, wanted: wasActive ? "ended" : "declined" };
+      // DISPOSE FIRST: the red button ends THIS device's participation the
+      // instant it is pressed — ring, room, captured mic/camera/screen all
+      // die now, not after a (possibly hung or offline) server round-trip.
+      // The leaveRef retry loop guarantees the server row still converges.
+      cleanup();
       try {
         await endCallMut({ callId: s.callId, token, status: wasActive ? "ended" : "declined" });
       } catch {
-        /* noop */
+        /* leaveRef retries when connectivity returns */
       }
-      cleanup();
     } finally {
       endingRef.current = false;
       busyRef.current = false;
@@ -2013,15 +2105,22 @@ export function useCallkit(token: string | null): GarmaCallkit {
   // ---- Controls (routed through LiveKit) ----
   const toggleMic = useCallback(async () => {
     const room = roomRef.current;
-    if (!room) return;
+    // Serialize taps and bound the toggle: an unbounded setMicrophoneEnabled
+    // can hang on some Androids and silently desync intent/track/UI.
+    if (!room || micBusyRef.current) return;
     const next = !micOn;
+    micBusyRef.current = true;
     try {
-      await room.localParticipant.setMicrophoneEnabled(next);
-    } catch {
-      /* noop */
+      try {
+        await withTimeout(room.localParticipant.setMicrophoneEnabled(next), 10_000, "mic_toggle_timeout");
+        micIntentRef.current = next;
+        setMicOn(next);
+      } catch {
+        setMicError("تغییر وضعیت میکروفون ممکن نشد؛ دوباره تلاش کن");
+      }
+    } finally {
+      micBusyRef.current = false;
     }
-    micIntentRef.current = next;
-    setMicOn(next);
   }, [micOn]);
 
   const toggleCam = useCallback(async () => {
