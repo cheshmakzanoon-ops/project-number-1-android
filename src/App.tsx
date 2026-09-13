@@ -76,6 +76,84 @@ export function App() {
   const push = usePush(token);
   const { session } = callkit;
 
+  // ---- Incoming-call notification actions (پاسخ / رد) --------------------
+  // When the phone rings while the app is closed or backgrounded, the OS
+  // notification offers WhatsApp-style answer/reject buttons. Tapping one
+  // arrives here from the service worker (postMessage) or via the URL the
+  // worker opens when no window is up (?call=<id>&callAction=accept|decline).
+  // Both run through the same hook calls the on-screen buttons use, so the
+  // call follows the ONE lifecycle code path (media capture, room join,
+  // server row) with no duplicate logic.
+  //
+  // The command is STATE, not a ref: the executor below must re-run the
+  // moment it lands, and only a state change re-renders. A cold boot needs a
+  // beat for the Convex subscription to present the ringing session — a
+  // command that arrives before it is held until the matching session
+  // exists; one for a call that already ended is dropped.
+  const [pendingCallCommand, setPendingCallCommand] = useState<{
+    callId: string;
+    action: "accept" | "decline";
+  } | null>(null);
+  const handleNotificationAction = useCallback((callId: string, action: string) => {
+    if (action === "accept" || action === "decline") {
+      setPendingCallCommand({ callId, action });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    // Messages FROM the service worker (client.postMessage) arrive on the
+    // ServiceWorkerContainer itself — the registration object never fires
+    // "message" events, so listening there would silently drop every tap.
+    const onMessage = (event: MessageEvent) => {
+      const msg = event.data as { type?: string; callId?: string; action?: string } | null;
+      if (!msg || msg.type !== "call-action" || !msg.callId) return;
+      handleNotificationAction(msg.callId, msg.action ?? "");
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [handleNotificationAction]);
+
+  // URL handoff for the "no window was open" case: the service worker opens
+  // /?call=<id>&callAction=… and this one-shot effect consumes it on boot.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const callId = params.get("call");
+    const callAction = params.get("callAction");
+    if (!callId || !callAction) return;
+    // Strip the command from the address bar so a reload / share of the URL
+    // never re-answers or re-declines the same call.
+    params.delete("call");
+    params.delete("callAction");
+    const qs = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+    handleNotificationAction(callId, callAction);
+  }, [handleNotificationAction]);
+
+  // Executor: once the ringing session for the pending command is presented
+  // (the Convex subscription can take a moment after a cold boot), run the
+  // same hook call the on-screen button would have. Both accept and decline
+  // wait for the session — the hook needs it to know which call to act on —
+  // and a command for a call that already ended (ring timeout before the
+  // app even booted) simply never matches and is dropped: call ids are
+  // unique, so it can never fire on a later ring.
+  useEffect(() => {
+    if (!pendingCallCommand) return;
+    if (session?.callId !== pendingCallCommand.callId || session.phase !== "incoming") return;
+    setPendingCallCommand(null);
+    if (pendingCallCommand.action === "accept") void callkit.accept();
+    else void callkit.decline();
+  }, [pendingCallCommand, session, callkit]);
+
+  // A pending command older than the ring itself (~45–75 s) can no longer
+  // match a live ring — clear it on a real timer, not by waiting for some
+  // unrelated re-render.
+  useEffect(() => {
+    if (!pendingCallCommand) return;
+    const t = window.setTimeout(() => setPendingCallCommand(null), 60_000);
+    return () => window.clearTimeout(t);
+  }, [pendingCallCommand]);
+
   // Keep the on-device identity in step with the server: cache it once the
   // query answers, drop it when the backend says this device is unknown (e.g.
   // after a backend reset) so we don't paint a ghost identity forever.

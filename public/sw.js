@@ -9,7 +9,7 @@
  * cache name is what actually evicts stale icons/shell from phones that
  * already installed the app.
  */
-const CACHE = "garma-shell-v4";
+const CACHE = "garma-shell-v5";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -70,6 +70,17 @@ self.addEventListener("push", (event) => {
         renotify: true,
         requireInteraction: true, // stays on screen until answered/dismissed
         vibrate: Array.isArray(data.vibrate) ? data.vibrate : [500, 200, 500, 200, 500],
+        // WhatsApp-style action buttons. Chrome/Android renders these
+        // directly on the notification: the user can answer or reject the
+        // call without the app opening. FCM replaces any missing/unknown
+        // action with "Open" (launches the app into the in-app ring), so a
+        // payload without them keeps working on every browser.
+        actions: data.callId
+          ? [
+              { action: "accept", title: "پاسخ" },
+              { action: "decline", title: "رد" },
+            ]
+          : [],
         data: { callId: data.callId, kind: data.kind, timestamp: data.timestamp || Date.now() },
       };
       try {
@@ -87,17 +98,56 @@ self.addEventListener("push", (event) => {
   );
 });
 
-// Tapping the notification opens (or focuses) the app, which then shows the
+// Tapping the notification body opens (or focuses) the app, which shows the
 // full in-app incoming-call screen via the normal Convex subscription.
+// Tapping «پاسخ» (Accept) or «رد» (Decline) ACTS from the notification: the
+// command goes straight to a running app (postMessage), or — when no window
+// is open — the app is launched with the command in the URL. Either way the
+// app runs the same accept/decline code path as the on-screen buttons.
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const action = event.notification.action; // "" for a plain tap, "accept"/"decline" for the buttons
+  const data = event.notification.data || {};
+  const callId = typeof data.callId === "string" ? data.callId : "";
+  const isCallAction = !!callId && (action === "accept" || action === "decline");
+
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
-      for (const c of list) {
+    (async () => {
+      const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const usable = list.filter((c) => "focus" in c);
+
+      // A call action never means "just open the app": hand the command to a
+      // running instance (no reload — media/camera state is preserved), and
+      // only launch a fresh one when none is up. Every window is told; the
+      // handler matches by call id, so extra copies are ignored.
+      if (isCallAction) {
+        for (const c of usable) {
+          try {
+            c.postMessage({ type: "call-action", callId, action });
+          } catch {
+            /* client may be mid-navigation; the launch below covers it */
+          }
+        }
+        if (usable.length > 0) {
+          try {
+            await usable[0].focus();
+          } catch {
+            /* focus is best-effort; the command was delivered */
+          }
+          return;
+        }
+        await self.clients.openWindow(
+          `${self.location.origin}/?call=${encodeURIComponent(callId)}&callAction=${action}`,
+        );
+        return;
+      }
+
+      // Plain tap on the notification body: just bring the app to the front.
+      for (const c of usable) {
         if ("focus" in c) return c.focus();
       }
-      return self.clients.openWindow("/");
-    }),
+      await self.clients.openWindow("/");
+    })(),
   );
 });
 
