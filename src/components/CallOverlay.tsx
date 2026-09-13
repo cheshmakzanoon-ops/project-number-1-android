@@ -19,6 +19,7 @@ import { Avatar } from "./Avatar";
 import { RemoteVideoFeed } from "./RemoteVideoFeed";
 import { fa } from "../lib/format";
 import { IS_EMBEDDED, openAppTopLevel } from "../lib/browser";
+import { ANDROID_COMPANION_INSTALL_URL } from "../lib/screenShare";
 import type { CallSession, GarmaCallkit, RemotePeer } from "../lib/useCallkit";
 
 function useElapsed(phase: CallSession["phase"]) {
@@ -169,6 +170,28 @@ export function CallOverlay({
     return () => window.clearTimeout(t);
   }, [kit.micError, kit]);
 
+  // The Android companion deep link falls back to this app with
+  // `?screen-share=no-companion` when the companion is not installed. That is
+  // not an error the user should have to guess at: say exactly what to install
+  // (and offer the direct link), then clean the query string away.
+  const [companionNotice, setCompanionNotice] = useState(false);
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("screen-share") !== "no-companion") return;
+      setCompanionNotice(true);
+      params.delete("screen-share");
+      const qs = params.toString();
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + (qs ? `?${qs}` : "") + window.location.hash,
+      );
+    } catch {
+      /* noop */
+    }
+  }, []);
+
   const toggleFullscreen = () => {
     const el = containerRef.current;
     if (!el) return;
@@ -261,6 +284,33 @@ export function CallOverlay({
               !
             </span>
             {kit.shareError}
+          </span>
+        </div>
+      )}
+
+      {/* Android companion missing (returned from the deep-link fallback) */}
+      {companionNotice && (
+        <div className="absolute inset-x-0 top-28 z-40 flex justify-center px-4">
+          <span className="animate-rise flex flex-col items-center gap-2 rounded-2xl border border-amber-300/30 bg-[#241206]/95 px-4 py-3 text-center text-[12px] font-bold leading-5 text-amber-50 backdrop-blur">
+            برای اشتراک صفحهٔ این گوشی، «اپ همراه گرما» لازم است (کروم اندروید خودش اجازهٔ
+            فرستادن صفحه را نمی‌دهد).
+            <span className="flex items-center gap-2">
+              <a
+                href={ANDROID_COMPANION_INSTALL_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 rounded-full bg-amber-400 px-3.5 py-1.5 text-[12px] font-extrabold text-cocoa shadow-md shadow-black/30 transition hover:bg-amber-300 active:scale-95"
+              >
+                <ExternalLink size={13} />
+                نصب اپ همراه
+              </a>
+              <button
+                onClick={() => setCompanionNotice(false)}
+                className="rounded-full border border-white/15 px-3 py-1.5 text-[12px] font-bold text-white/80 transition hover:bg-white/10"
+              >
+                بعداً
+              </button>
+            </span>
           </span>
         </div>
       )}
@@ -410,7 +460,18 @@ export function CallOverlay({
               <CtrlBtn
                 on={kit.sharing}
                 spin={kit.shareStarting}
-                label={kit.sharing ? "پایان اشتراک" : "اشتراک صفحه"}
+                // The label follows the device's REAL path: browser display
+                // capture, or the Android MediaProjection companion. Nothing
+                // claims a capability the device does not have.
+                label={
+                  kit.sharing
+                    ? kit.nativeSharing
+                      ? "پایان اشتراک (اپ همراه)"
+                      : "پایان اشتراک"
+                    : kit.sharePath === "android-native"
+                      ? "اشتراک صفحه (اپ همراه)"
+                      : "اشتراک صفحه"
+                }
                 onClick={kit.toggleShare}
               >
                 <MonitorUp size={22} />
@@ -508,7 +569,14 @@ export function CallOverlay({
               <CtrlBtn on={kit.micOn} onClick={kit.toggleMic} label={kit.micOn ? "سکوت" : "صدا"}>
                 {kit.micOn ? <Mic size={22} /> : <MicOff size={22} />}
               </CtrlBtn>
-              <CtrlBtn on={kit.speakerOn} label={kit.speakerOn ? "بلندگو" : "بی‌صدا"} onClick={kit.toggleSpeaker}>
+              {/* Remote AUDIO on/off (volume 0/1) — deliberately not labelled
+                  as speaker routing: the Web platform cannot force physical
+                  speaker/earpiece routing on a phone. */}
+              <CtrlBtn
+                on={kit.speakerOn}
+                label={kit.speakerOn ? "صدای مخاطب" : "قطع صدای مخاطب"}
+                onClick={kit.toggleSpeaker}
+              >
                 <Volume2 size={22} />
               </CtrlBtn>
               <CtrlBtn label="صفحه اصلی" onClick={onMinimize}>

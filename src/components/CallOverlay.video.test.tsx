@@ -109,6 +109,8 @@ function makeKit(overrides: Partial<GarmaCallkit> = {}): GarmaCallkit {
     camOn: true,
     speakerOn: true,
     sharing: false,
+    nativeSharing: false,
+    sharePath: "web",
     shareStarting: false,
     shareError: null,
     clearShareError: () => {},

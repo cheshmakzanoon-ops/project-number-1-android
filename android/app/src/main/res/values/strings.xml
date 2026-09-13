@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">همراه اشتراک صفحهٔ گرما</string>
+    <string name="share_link_label">اشتراک صفحهٔ گرما</string>
+
+    <string name="notification_channel_name">اشتراک صفحه</string>
+    <string name="notification_channel_description">وقتی صفحهٔ گوشی در تماس گرما فرستاده می‌شود</string>
+    <string name="notification_title">در حال فرستادن صفحه</string>
+    <string name="notification_text">صفحهٔ گوشی تو در تماس گرما به‌اشتراک گذاشته شده است</string>
+    <string name="notification_stop">پایان اشتراک</string>
+</resources>

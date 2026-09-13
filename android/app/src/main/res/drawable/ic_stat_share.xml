@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple screen-with-arrow glyph: the app icon and the share notification's
+     small icon (a monochrome, alpha-only shape as Android requires). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M3,4h18a1,1 0 0 1 1,1v10a1,1 0 0 1 -1,1h-7v2h3v2H7v-2h3v-2H3a1,1 0 0 1 -1,-1V5a1,1 0 0 1 1,-1zM4,6v8h16V6H4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,6.5l3.2,3.2h-2.2v3.1h-2V9.7H8.8z" />
+</vector>

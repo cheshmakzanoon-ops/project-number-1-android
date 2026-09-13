@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Garma screen-share companion.
+
+  This app is NOT a second messaging client: it has no account, no chat, no
+  contacts and no credentials at rest. It exists only to give Android a real
+  MediaProjection capture path that the browser cannot provide, publishing into
+  the SAME LiveKit call as the browser participant (as an auxiliary
+  "<userId>:screen" identity).
+
+  Security notes (see ../../README.md and src/lib/screenShareProtocol.ts):
+  - The app is launched with nothing but an opaque, single-use, <=60s handoff
+    code. No LiveKit JWT, Convex token, API secret or room credential ever
+    travels through the URL, and the app refuses to accept a server address
+    from the intent (the deployment URL is baked into BuildConfig).
+  - Every share needs a fresh Android system consent dialog for MediaProjection
+    (Android itself enforces this for targetSdk 34+).
+  - A foreground service with a persistent, user-visible notification runs for
+    exactly as long as the capture does, with a STOP action.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Audio DEVICE handling only (the LiveKit SDK selects the output route).
+         This companion never records the microphone, so RECORD_AUDIO is
+         deliberately NOT requested. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Required to run the MediaProjection capture as a foreground service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- The share notification must be visible while sharing (Android 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_stat_share"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+
+        <!-- NOTE: deliberately NO `android:noHistory="true"`. This activity must
+             survive the system MediaProjection consent dialog (a separate
+             activity that covers it): with noHistory the activity is finished
+             on the first onStop, so its activity-result callback would never
+             fire and the share could never start. -->
+        <activity
+            android:name=".ScreenShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Primary entry: the opaque handoff code on a custom scheme.
+                 Chrome launches this via an `intent://` URL, which needs no
+                 domain verification and can never be hijacked by another app
+                 because the package is pinned in that URL. -->
+            <intent-filter android:label="@string/share_link_label">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="garma-screenshare" android:host="share" />
+            </intent-filter>
+
+            <!-- Optional verified App Link (https). Requires
+                 https://<appLinkHost>/.well-known/assetlinks.json listing this
+                 app's SHA-256 signing fingerprint; until that file exists the
+                 browser falls back to the custom scheme above. -->
+            <intent-filter android:autoVerify="true" android:label="@string/share_link_label">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="${appLinkHost}"
+                    android:pathPrefix="/screen-share" />
+            </intent-filter>
+        </activity>
+
+        <!-- Foreground capture service: owns the MediaProjection, the LiveKit
+             room and the auxiliary publication.
+             `stopWithTask=false` keeps the capture independent of the browser
+             task (the share legitimately outlives the tab), so the service
+             implements `onTaskRemoved` to end the share explicitly when the
+             user does swipe it away — combined with the notification STOP
+             action and the call-state poll, there is no path that leaves a
+             capture running with no way to stop it. -->
+        <service
+            android:name=".ScreenShareService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="false" />
+    </application>
+</manifest>

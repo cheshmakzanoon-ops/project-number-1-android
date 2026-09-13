@@ -1,6 +1,7 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { pruneExpiredHandoffs } from "./screenShare";
 import type { Id } from "./_generated/dataModel";
 
 type ParticipantRowDoc = {
@@ -65,11 +66,19 @@ export const start = mutation({
     // participates in a ringing or active call (a double-tap that raced past
     // the client guard, a second device, or a call left open before a
     // reload), refuse to stack another ringing row on top of it.
-    const myLive = await ctx.db
+    //
+    // Rows with `leftAt` are NOT participation: a group call keeps running for
+    // the people still in it after someone hangs up, so a departed member is
+    // no longer busy and must be able to start their own call (they cannot
+    // answer or publish into the old one — `answer`, `details` and the token
+    // action all reject a row that has left). Only a row where the user is
+    // genuinely still present blocks a new call.
+    const myRows = await ctx.db
       .query("callParticipants")
       .withIndex("by_user", (q) => q.eq("userId", me))
       .collect();
-    for (const p of myLive) {
+    for (const p of myRows) {
+      if (p.leftAt) continue;
       const live = await ctx.db.get(p.callId);
       if (live && (live.status === "ringing" || live.status === "active")) {
         throw new Error("already_in_call");
@@ -558,6 +567,11 @@ export const cleanupStale = mutation({
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
     const now = Date.now();
+
+    // Screen-share handoff codes are one-time and short-lived; sweep the ones
+    // nobody redeemed so the table stays small (and so a stale row can never
+    // be mistaken for a usable code).
+    await pruneExpiredHandoffs(ctx);
 
     const staleRings = await ctx.db
       .query("calls")

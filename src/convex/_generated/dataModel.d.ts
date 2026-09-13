@@ -264,6 +264,36 @@ export type DataModel = {
     searchIndexes: {};
     vectorIndexes: {};
   };
+  screenShareHandoffs: {
+    document: {
+      callId: Id<"calls">;
+      codeHash: string;
+      consumedAt?: number;
+      createdAt: number;
+      expiresAt: number;
+      userId: Id<"users">;
+      _id: Id<"screenShareHandoffs">;
+      _creationTime: number;
+    };
+    fieldPaths:
+      | "_creationTime"
+      | "_id"
+      | "callId"
+      | "codeHash"
+      | "consumedAt"
+      | "createdAt"
+      | "expiresAt"
+      | "userId";
+    indexes: {
+      by_id: ["_id"];
+      by_creation_time: ["_creationTime"];
+      by_call: ["callId", "_creationTime"];
+      by_code_hash: ["codeHash", "_creationTime"];
+      by_user: ["userId", "_creationTime"];
+    };
+    searchIndexes: {};
+    vectorIndexes: {};
+  };
   sessions: {
     document: {
       createdAt: number;

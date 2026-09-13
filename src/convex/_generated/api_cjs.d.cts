@@ -152,6 +152,18 @@ export declare const api: {
       { callId: Id<"calls">; token: string },
       any
     >;
+    redeemScreenShareHandoff: FunctionReference<
+      "action",
+      "public",
+      { code: string },
+      any
+    >;
+    requestScreenShareHandoff: FunctionReference<
+      "action",
+      "public",
+      { callId: Id<"calls">; token: string },
+      any
+    >;
   };
   messages: {
     edit: FunctionReference<
@@ -247,6 +259,14 @@ export declare const api: {
       any
     >;
   };
+  screenShare: {
+    sessionState: FunctionReference<
+      "query",
+      "public",
+      { sessionId: Id<"screenShareHandoffs"> },
+      any
+    >;
+  };
   statuses: {
     cleanupExpired: FunctionReference<
       "mutation",
@@ -329,6 +349,26 @@ export declare const api: {
  * const myFunctionReference = internal.myModule.myFunction;
  * ```
  */
-export declare const internal: {};
+export declare const internal: {
+  screenShare: {
+    consumeHandoff: FunctionReference<
+      "mutation",
+      "internal",
+      { codeHash: string },
+      any
+    >;
+    insertHandoff: FunctionReference<
+      "mutation",
+      "internal",
+      {
+        callId: Id<"calls">;
+        codeHash: string;
+        ttlMs?: number;
+        userId: Id<"users">;
+      },
+      any
+    >;
+  };
+};
 
 export declare const components: {};

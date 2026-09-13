@@ -40,7 +40,54 @@ export function createOwner(callId: string | null, kind: "audio" | "video"): Cal
 }
 
 /** What kind of work an operation represents. */
-export type OpKind = "connect" | "camera" | "share" | "switch" | "accept" | "start";
+export type OpKind =
+  | "connect"
+  | "camera"
+  | "share"
+  | "switch"
+  | "mic"
+  | "accept"
+  | "start";
+
+/**
+ * How long each owned operation may wait before its deadline fires.
+ *
+ * Mutable on purpose (tests shrink them to exercise the real code paths fast;
+ * production keeps the defaults below).
+ *
+ * Single source of truth: every one of these bounds a promise that
+ * OWNS a local media resource (or a room), so the value decides how long a
+ * capture attempt can stay outstanding before the call stops waiting for it —
+ * and, crucially, before the late-result handler takes over disposing of
+ * whatever eventually arrives. Tests shrink these to run the real code paths
+ * quickly instead of mocking the ownership model away.
+ */
+export const CALL_OP_TIMEOUTS = {
+  /** Initial microphone publication on a fresh room. */
+  mic: 8_000,
+  /** Bounded pause before the single automatic microphone retry. */
+  micRetryDelay: 700,
+  /** Camera capture/publish (getUserMedia can be slow on some Androids). */
+  camera: 15_000,
+  /** Camera flip (restartTrack / facing fallback / republish). */
+  cameraSwitch: 15_000,
+  /** Screen-share picker + publish (the user may take a while choosing). */
+  share: 20_000,
+  /** Token action + room connect from the app side. */
+  connect: 45_000,
+  /**
+   * How long a hangup waits for the end/decline mutation to land before it
+   * gives up on THAT attempt and schedules another one in the background.
+   * The local teardown never waits at all — this only bounds server
+   * convergence so a dead network cannot keep the red button "busy".
+   */
+  endMutation: 8_000,
+  /** Bounded warm-up window for the permission-priming getUserMedia. */
+  prime: 10_000,
+};
+
+/** The production values, so tests can restore whatever they shrank. */
+export const DEFAULT_CALL_OP_TIMEOUTS = { ...CALL_OP_TIMEOUTS };
 
 /** One asynchronous operation inside a call lifecycle. The `id` is the
  *  immutable identity used to decide whether a late completion may act. */

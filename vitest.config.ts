@@ -6,10 +6,6 @@ export default defineConfig({
     environment: "jsdom",
     clearMocks: true,
     restoreMocks: true,
-    include: [
-      "src/components/RemoteVideoFeed.test.tsx",
-      "src/components/CallOverlay.video.test.tsx",
-      "src/lib/useCallkit.video.test.tsx",
-    ],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

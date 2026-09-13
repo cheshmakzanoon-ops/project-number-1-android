@@ -151,6 +151,26 @@ export default defineSchema({
     .index("by_call_user", ["callId", "userId"])
     .index("by_user", ["userId"]),
 
+  // One-time, short-lived screen-share handoff codes. The browser never hands
+  // a Convex token, a LiveKit JWT or any room credential to the Android
+  // companion: it hands over only an opaque random code, which the companion
+  // exchanges server-side exactly once for a restricted LiveKit grant.
+  //   codeHash  — sha256 of the code; the raw code is never stored.
+  //   userId/callId — who this handoff belongs to, decided by the server.
+  //   expiresAt — hard TTL (<=60s) even if the row is never consumed.
+  //   consumedAt — set the instant the code is redeemed (single use).
+  screenShareHandoffs: defineTable({
+    codeHash: v.string(),
+    userId: v.id("users"),
+    callId: v.id("calls"),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    consumedAt: v.optional(v.number()),
+  })
+    .index("by_code_hash", ["codeHash"])
+    .index("by_call", ["callId"])
+    .index("by_user", ["userId"]),
+
   // WebRTC signaling channel between the two peer devices.
   callSignals: defineTable({
     callId: v.id("calls"),

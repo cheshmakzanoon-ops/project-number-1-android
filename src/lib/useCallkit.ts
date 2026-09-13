@@ -4,8 +4,9 @@ import { useAction, useMutation } from "convex/react";
 // never has to download it — it only loads once a call actually starts.
 import type { LocalVideoTrack, RemoteVideoTrack, Room, TrackPublication, VideoEncoding } from "livekit-client";
 import { livekit, loadLiveKit } from "./livekitLoader";
-import { IS_EMBEDDED, IS_IOS, IS_PHONE } from "./browser";
+import { IS_EMBEDDED, IS_PHONE } from "./browser";
 import {
+  CALL_OP_TIMEOUTS,
   cancelOp,
   classifyConnectError,
   createOp,
@@ -20,11 +21,27 @@ import {
   type ConnectResult,
   type OpHandle,
 } from "./callLifecycle";
+import {
+  baseIdentityOf,
+  isAuxScreenIdentity,
+  screenOwnerOf,
+} from "./screenShareProtocol";
+import {
+  androidCompanionLaunchUrl,
+  clearWebDisplayCaptureBroken,
+  currentShareEnvironment,
+  markWebDisplayCaptureBroken,
+  resolveScreenSharePath,
+  unsupportedScreenShareMessage,
+  type ScreenSharePath,
+  type ShareEnvironment,
+} from "./screenShare";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "./softQuery";
 import type { Id } from "../convex/_generated/dataModel";
 
 export type CallPhase = "idle" | "outgoing" | "incoming" | "active";
+// (phase type unchanged — anchor probe)
 export type CallKind = "audio" | "video";
 
 /** One other person on/being rung for a call (me excluded). */
@@ -92,6 +109,15 @@ export interface GarmaCallkit {
   sharing: boolean;
   /** True while the browser's share picker/capture is in flight. */
   shareStarting: boolean;
+  /**
+   * How this device can share a screen: the browser's own display capture,
+   * the Android MediaProjection companion, or neither. UI copy must follow
+   * this instead of claiming a path the device does not have.
+   */
+  sharePath: ScreenSharePath;
+  /** True while the Android companion (this user's auxiliary participant) is
+   *  publishing this user's screen into the call. */
+  nativeSharing: boolean;
   /** Human-readable (Persian) screen-share failure, if the last attempt failed. */
   shareError: string | null;
   clearShareError: () => void;
@@ -193,6 +219,29 @@ function camFailureMessage(denied: boolean): string {
     return "اجازهٔ دوربین داده نشده است؛ در مرورگر روی آیکون قفل بزن و دسترسی دوربین را فعال کن، بعد دوباره دکمهٔ دوربین را بزن.";
   }
   return "دوربین روشن نشد؛ دوباره روی دکمهٔ دوربین بزن تا دوباره تلاش کند.";
+}
+
+/**
+ * Honest Persian explanation for a failed WEB screen-share attempt. It never
+ * claims a browser can do something it cannot: a device that has no working
+ * web capture is routed to the Android companion instead (see toggleShare).
+ */
+function shareFailureMessage(env: ShareEnvironment, name: string, msg: string): string {
+  if (msg === "share_timeout") {
+    return env.embedded
+      ? "پنجرهٔ انتخاب صفحه باز نشد — این نمای جاسازی‌شده اجازهٔ اشتراک صفحه نمی‌دهد؛ اپ را مستقیم در مرورگر باز کن."
+      : "پنجرهٔ انتخاب صفحه باز نشد؛ دوباره تلاش کن.";
+  }
+  if (name === "NotAllowedError" || /permission|cancel/i.test(msg)) {
+    if (env.ios) {
+      return "سافاری آیفون اجازهٔ اشتراک صفحه نمی‌دهد؛ از گوشی اندروید (با اپ همراه) یا کامپیوتر استفاده کن.";
+    }
+    if (env.android) {
+      return "برای اشتراک صفحه باید در پنجرهٔ سیستم «شروع/ضبط» را بزنی و تأیید کنی.";
+    }
+    return "برای اشتراک صفحه باید اجازه بدهی (گزینهٔ مورد نظر را انتخاب و تأیید کن).";
+  }
+  return "اشتراک صفحه ممکن نشد؛ دوباره تلاش کن.";
 }
 
 function one(media: MediaStreamTrack | null | undefined): MediaStream | null {
@@ -383,6 +432,88 @@ function clearPartVideo(part: Part, source: "camera" | "screen"): boolean {
     part.screenOn = false;
   }
   return true;
+}/**
+ * A bounded pause that can be abandoned: the caller re-checks operation
+ * identity afterwards, so a hangup during the pause costs nothing.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+/**
+ * Stop a local capture track that a TIMED-OUT operation produced late.
+ *
+ * Ownership rule (the heart of the async-repair contract): an obsolete
+ * operation may only ever dispose of ITS OWN resource. A track that is still
+ * the room's current publication of that source belongs to the LIVE call and
+ * must not be stopped from a stale continuation; a track on a room that is no
+ * longer current (hangup, newer call) is ours to release, because that room's
+ * teardown sweep has already run and will not see a publication that arrived
+ * afterwards.
+ */
+function releaseLateTrack(args: {
+  lateTrack: MediaStreamTrack | null | undefined;
+  /**
+   * The track the room publishes for this source RIGHT NOW, or null when the
+   * room is no longer the call's current room (nothing is "current" there
+   * any more, so whatever arrives late is ours to release).
+   */
+  currentTrack: () => MediaStreamTrack | null | undefined;
+  /** True while this operation is still the live one for its source. */
+  opStillCurrent: boolean;
+}): void {
+  const { lateTrack, currentTrack, opStillCurrent } = args;
+  if (!lateTrack) return;
+  if (opStillCurrent) return; // the live call's own capture: keep it
+  try {
+    if (currentTrack() === lateTrack) return; // still the room's live track
+  } catch {
+    /* the room can no longer answer: fall through and release */
+  }
+  safeStopTrack(lateTrack);
+}
+
+/** LiveKit data topic used to ask an Android companion to stop capturing. */
+const NATIVE_SHARE_TOPIC = "garma.screen-share";
+
+/** The room's current microphone publication, or null. */
+function micPublicationOf(room: Room): TrackPublication | null {
+  try {
+    return room.localParticipant.getTrackPublication(livekit().Track.Source.Microphone) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Is the local microphone really published and unmuted on this room? */
+function micIsLive(room: Room): boolean {
+  const p = micPublicationOf(room);
+  return !!p?.track && !p.isMuted;
+}
+
+/**
+ * Ask the Android screen-share companion to stop capturing.
+ *
+ * This is a REQUEST over the official LiveKit data channel, never authority:
+ * the companion also polls its server-side session, so a lost message can
+ * never leave a MediaProjection capture running.
+ */
+function requestNativeShareStop(room: Room | null, auxIdentity: string): void {
+  if (!room) return;
+  try {
+    const target = room.remoteParticipants?.get(auxIdentity);
+    if (!target) return;
+    const payload = new TextEncoder().encode(JSON.stringify({ type: "stop" }));
+    void room.localParticipant
+      .publishData(payload, {
+        reliable: true,
+        topic: NATIVE_SHARE_TOPIC,
+        destinationIdentities: [auxIdentity],
+      })
+      .catch(() => {});
+  } catch {
+    /* best effort: the companion's own poll is the backstop */
+  }
 }
 
 /**
@@ -414,6 +545,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const [camFacing, setCamFacing] = useState<"user" | "environment" | "">("");
   const [local, setLocal] = useState<MediaStream | null>(null);
   const [screenLocal, setScreenLocal] = useState<MediaStream | null>(null);
+  /** True while MY Android companion publishes MY screen into this call. */
+  const [nativeSharing, setNativeSharing] = useState(false);
+  /** Which capture path this device has (web / android companion / none). */
+  const [sharePath, setSharePath] = useState<ScreenSharePath>(() =>
+    resolveScreenSharePath(currentShareEnvironment()),
+  );
 
   const roomRef = useRef<Room | null>(null);
   const lastCamIdRef = useRef<string>("");
@@ -462,20 +599,27 @@ export function useCallkit(token: string | null): GarmaCallkit {
       setCamCount(0);
       return;
     }
+    // An enumeration can answer after this effect was torn down (the call
+    // ended): an obsolete result must never speak for a newer lifecycle.
+    let stale = false;
     const refresh = () => {
       md.enumerateDevices()
-        .then((devices) =>
+        .then((devices) => {
+          if (stale) return;
           // Browser permission gates the real device ids: until the camera
           // has been opened, devices come back with empty ids/labels and the
-          // count would read 0. Re-run whenever the camera turns on (that's
+          // count would read 0. Re-run whenever the camera turns on (that is
           // when the ids appear) as well as on devicechange.
-          setCamCount(devices.filter((d) => d.kind === "videoinput" && d.deviceId).length),
-        )
+          setCamCount(devices.filter((d) => d.kind === "videoinput" && d.deviceId).length);
+        })
         .catch(() => {});
     };
     refresh();
     md.addEventListener?.("devicechange", refresh);
-    return () => md.removeEventListener?.("devicechange", refresh);
+    return () => {
+      stale = true;
+      md.removeEventListener?.("devicechange", refresh);
+    };
   }, [videoSessionActive, camOn]);
 
   const partOf = useCallback((userId: string): Part => {
@@ -506,6 +650,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
     }
     return map;
   }, [session]);
+  /**
+   * The same map, readable from long-lived room handlers: they are created
+   * once per room and must see the CURRENT peer list (an auxiliary
+   * screen-share participant is only attributed to a user we know is on this
+   * call), not the list from the render that created them.
+   */
+  const partNamesRef = useRef(partNames);
+  partNamesRef.current = partNames;
 
   /** Snapshot of live remote media for the overlay, ordered by joined peers.
    *  Video whose browser track ended is masked to null: a remote track can die
@@ -586,12 +738,29 @@ export function useCallkit(token: string | null): GarmaCallkit {
   // guessing from session state.
   const ownerRef = useRef<CallOwner | null>(null);
   /** The one current operation of each kind inside the live lifecycle. */
-  const opRefs = useRef<Record<"connect" | "camera" | "share" | "switch", OpHandle | null>>({
+  const opRefs = useRef<Record<"connect" | "camera" | "share" | "switch" | "mic", OpHandle | null>>({
     connect: null,
     camera: null,
     share: null,
     switch: null,
+    mic: null,
   });
+  /** Own LiveKit identity (== my user id) for the current room. */
+  const myIdentityRef = useRef<string>("");
+  /** My own Android companion's auxiliary identity, while it is publishing. */
+  const nativeAuxIdRef = useRef<string | null>(null);
+  /**
+   * Background convergence for the end/decline mutation. Hangup never awaits
+   * the server (the red button must die locally at once), but the server row
+   * still has to converge — this retries a bounded number of times without
+   * ever holding the local lifecycle lock.
+   */
+  const endConvergeRef = useRef<{
+    callId: Id<"calls">;
+    status: "ended" | "declined";
+    attempts: number;
+    timer: number | null;
+  } | null>(null);
   const connectMediaRef = useRef<
     (callId: Id<"calls">, kind: CallKind, opts?: { restoreState?: boolean }) => Promise<ConnectResult>
   >(async () => "retryable");
@@ -603,6 +772,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
   const endCallMut = useMutation(api.calls.end);
   const answerCallMut = useMutation(api.calls.answer);
   const getToken = useAction(api.livekit.getToken);
+  const requestShareHandoff = useAction(api.livekit.requestScreenShareHandoff);
   const notifyIncoming = useAction(api.push.notifyIncomingCall);
 
   const clearShareError = useCallback(() => setShareError(null), []);
@@ -693,12 +863,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
     // are classified "cancelled", not retried and never shown as errors.
     const owner = ownerRef.current;
     if (owner) owner.disposed = true;
-    for (const key of ["connect", "camera", "share", "switch"] as const) {
+    for (const key of ["connect", "camera", "share", "switch", "mic"] as const) {
       cancelOp(opRefs.current[key]);
       opRefs.current[key] = null;
     }
     ownerRef.current = null;
     connRetryDelayRef.current = 1500;
+    // My Android companion is a separate app: it cannot be "stopped" by
+    // tearing the browser side down, so ask it to stop (best effort, official
+    // LiveKit data channel) — its own poll of the call state is the backstop.
+    if (nativeAuxIdRef.current) {
+      requestNativeShareStop(roomRef.current, nativeAuxIdRef.current);
+      nativeAuxIdRef.current = null;
+    }
+    setNativeSharing(false);
     for (const part of partsRef.current.values()) {
       part.micEls.forEach((el) => {
         el.pause();
@@ -713,6 +891,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
     commitParts();
     clearRingTtl();
     clearQualityWatch();
+    // Per-lifecycle operation locks die with the lifecycle. Without this, an
+    // obsolete operation from a dead call (a camera flip or capture that is
+    // still awaiting a slow browser) would keep the NEXT call's camera, mic
+    // and share controls locked out — the user would have to tap twice on a
+    // fresh call for no visible reason. The operation itself is made inert by
+    // the ownership checks; the lock is not its to hold any more.
+    tierBusyRef.current = false;
+    micBusyRef.current = false;
+    shareBusyRef.current = false;
+    // A pending server-convergence timer belongs to the lifecycle being torn
+    // down; a newer call must never inherit it.
+    const converge = endConvergeRef.current;
+    if (converge?.timer != null) window.clearTimeout(converge.timer);
+    endConvergeRef.current = null;
     const room = roomRef.current;
     // ---- END-OF-CALL LOCAL-MEDIA OWNERSHIP ----
     // Teardown is where this device's captured media dies. The room's
@@ -766,6 +958,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
     sharingRef.current = false;
     setShareError(null);
     setShareStarting(false);
+    myIdentityRef.current = "";
     setCamQuality(null);
     setCamFacing("");
     setReconnecting(false);
@@ -924,7 +1117,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
         // selected device.
         if (existing?.track) {
           try {
-            await room.localParticipant.unpublishTrack(existing.track);
+            // Bounded: an SDK unpublish that never answers must not hold the
+            // camera lock for the rest of the call. The named track stays the
+            // target, so a late completion can never drop a newer one.
+            await withTimeout(
+              room.localParticipant.unpublishTrack(existing.track),
+              5_000,
+              "unpublish_timeout",
+            );
           } catch {
             /* the fresh publish below will fail visibly if the camera stuck */
           }
@@ -1015,8 +1215,103 @@ export function useCallkit(token: string | null): GarmaCallkit {
       } catch {
         return false;
       } finally {
-        tierBusyRef.current = false;
+        // Only THIS lifecycle's lock may be released: an obsolete capture that
+        // finishes late must never unlock a newer call's camera operation.
+        if (owner === ownerRef.current) tierBusyRef.current = false;
       }
+    },
+    [],
+  );
+
+  /**
+   * Publish (or unpublish) the local microphone as an OWNED operation.
+   *
+   * `setMicrophoneEnabled` is the one capture path that used to be awaited
+   * bare: a hung publish on a slow Android left connectMedia waiting forever,
+   * and a capture that resolved after a hangup kept the mic driver alive with
+   * no call behind it. It now has everything every other media operation has:
+   *
+   *  - a finite deadline (`CALL_OP_TIMEOUTS.mic`) so it can never wedge the
+   *    call lifecycle;
+   *  - an `OpHandle` under the current `CallOwner`, superseding any older
+   *    microphone operation of the same lifecycle;
+   *  - a post-await current-owner check before any state is committed;
+   *  - a late-result handler that disposes of a capture this operation
+   *    produced too late — and ONLY that capture: a track that is still the
+   *    room's current microphone publication belongs to the live call.
+   *
+   * Returns whether the microphone is actually live on that room afterwards.
+   */
+  const startMicrophoneOwned = useCallback(
+    async (target: Room, enable: boolean, owner: CallOwner): Promise<boolean> => {
+      cancelOp(opRefs.current.mic);
+      const op = createOp(owner, "mic");
+      opRefs.current.mic = op;
+      const currentTrack = (): MediaStreamTrack | null => {
+        if (roomRef.current !== target) return null; // old room: nothing is current
+        return micPublicationOf(target)?.track?.mediaStreamTrack ?? null;
+      };
+      const bounded = deadline(
+        target.localParticipant.setMicrophoneEnabled(enable),
+        CALL_OP_TIMEOUTS.mic,
+        "mic_timeout",
+      );
+      void bounded.late.then((r) => {
+        if (!r.late) return;
+        const pub = r.value as { track?: { mediaStreamTrack?: MediaStreamTrack } } | null | undefined;
+        const stillOurs = opCurrent(op, opRefs.current.mic);
+        const late = pub?.track?.mediaStreamTrack ?? currentTrack();
+        if (late) {
+          releaseLateTrack({
+            lateTrack: late,
+            currentTrack,
+            opStillCurrent: stillOurs,
+          });
+          return;
+        }
+        // The capture resolved without handing back a track while this op no
+        // longer owns the microphone AND the target room is no longer the
+        // call's current room: sweep THAT room's own microphone publication,
+        // exactly like the camera path does. A late capture must never stay
+        // listening with no call behind it — and the live room's microphone is
+        // never touched from here.
+        if (!stillOurs && roomRef.current !== target) {
+          try {
+            safeStopTrack(micPublicationOf(target)?.track?.mediaStreamTrack);
+          } catch {
+            /* noop */
+          }
+        }
+      });
+      let resolved: { track?: { mediaStreamTrack?: MediaStreamTrack } } | null | undefined;
+      try {
+        resolved = await bounded.result;
+      } catch {
+        // Deadline or capture failure. The caller reports it; the lifecycle is
+        // never blocked by it either way.
+      }
+      const stillOurs = opCurrent(op, opRefs.current.mic);
+      if (stillOurs) {
+        micIntentRef.current = enable;
+      } else if (enable) {
+        // The publish landed while this operation was already obsolete
+        // (hangup, a newer call, a superseded retry): the teardown sweep ran
+        // before this publication existed, so release OUR capture here — and
+        // never the microphone the live call is actually using.
+        const late = resolved?.track?.mediaStreamTrack ?? currentTrack();
+        if (late) {
+          releaseLateTrack({ lateTrack: late, currentTrack, opStillCurrent: false });
+        } else if (roomRef.current !== target) {
+          // No track handle came back at all: the only trace is the old room's
+          // own microphone source. Sweep that (never the live room's).
+          try {
+            safeStopTrack(micPublicationOf(target)?.track?.mediaStreamTrack);
+          } catch {
+            /* noop */
+          }
+        }
+      }
+      return enable ? micIsLive(target) : true;
     },
     [],
   );
@@ -1099,11 +1394,17 @@ export function useCallkit(token: string | null): GarmaCallkit {
             if (cur && cur.callId === callId) {
               setError(res);
               try {
-                await endCallMut({
-                  callId,
-                  token,
-                  status: cur.phase === "active" ? "ended" : "declined",
-                });
+                // Bounded: a hung server call must not keep a call the client
+                // already gave up on alive locally.
+                await withTimeout(
+                  endCallMut({
+                    callId,
+                    token,
+                    status: cur.phase === "active" ? "ended" : "declined",
+                  }),
+                  8_000,
+                  "end_timeout",
+                );
               } catch {
                 /* noop */
               }
@@ -1149,8 +1450,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
           "token_timeout",
         );
         // The lifecycle can end while the token action is in flight; an owner
-        // that died mid-token must not open a room behind the hangup.
-        if (owner.disposed) return "cancelled";
+        // that died mid-token must not open a room behind the hangup. A
+        // superseded attempt must not commit state either: `op` is cancelled
+        // the moment a newer connect adopts the same lifecycle.
+        if (owner.disposed || op.cancelled) return "cancelled";
         const startTier = opts?.restoreState ? captureTierRef.current : desiredTier();
         captureTierRef.current = startTier;
         setCamQuality(CAM_TIERS[startTier].label);
@@ -1182,6 +1485,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
         });
         roomRef.current = room;
         const r: Room = room; // stable, narrowed handle for the handlers below
+        // My own participant identity (== my user id, minted server-side in
+        // the LiveKit JWT). Needed to recognise my OWN Android screen-share
+        // companion, which joins as the auxiliary participant below.
+        myIdentityRef.current = r.localParticipant.identity ?? "";
 
         room.on(RoomEvent.LocalTrackPublished, (publication) => {
           if (roomRef.current !== r) return;
@@ -1212,7 +1519,28 @@ export function useCallkit(token: string | null): GarmaCallkit {
 
         room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
           if (roomRef.current !== r) return;
-          const uid = participant?.identity ?? "?";
+          const rawIdentity = participant?.identity ?? "?";
+          // ---- AUXILIARY SCREEN-SHARE PARTICIPANT ----
+          // The Android companion joins the SAME room under a server-derived
+          // "<userId>:screen" identity, so it can never evict or replace the
+          // user's own browser participant. Its screen track is attributed to
+          // the REAL user: the owner's existing RemotePeer gains the screen and
+          // no mystery participant is ever rendered. An auxiliary identity
+          // whose user is not on this call is ignored outright, and the
+          // companion may publish nothing but a screen.
+          const isAux = isAuxScreenIdentity(rawIdentity);
+          const auxOwner = isAux
+            ? screenOwnerOf(rawIdentity, myIdentityRef.current, [...partNamesRef.current.keys()])
+            : null;
+          if (isAux && (auxOwner === null || publication.source !== Track.Source.ScreenShare)) return;
+          if (isAux && auxOwner === myIdentityRef.current) {
+            // My OWN companion: this is my share, not a remote person's.
+            nativeAuxIdRef.current = rawIdentity;
+            sharingRef.current = true;
+            setNativeSharing(true);
+            return;
+          }
+          const uid = auxOwner ?? rawIdentity;
           const part = partOf(uid);
           if (publication.source === Track.Source.Microphone) {
             // Remote voice keeps SDK attachment (unchanged): a dedicated
@@ -1279,7 +1607,17 @@ export function useCallkit(token: string | null): GarmaCallkit {
         });
         room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
           if (roomRef.current !== r) return;
-          const uid = participant?.identity ?? "?";
+          const rawIdentity = participant?.identity ?? "?";
+          if (isAuxScreenIdentity(rawIdentity)) {
+            // The companion owns a screen and nothing else: clearing it leaves
+            // the owner's camera and microphone exactly as they were.
+            nativeAuxIdRef.current = null;
+            setNativeSharing(false);
+            const ownerPart = partsRef.current.get(baseIdentityOf(rawIdentity));
+            if (ownerPart && clearPartVideo(ownerPart, "screen")) commitParts();
+            return;
+          }
+          const uid = rawIdentity;
           if (publication.source === Track.Source.Microphone) {
             const part = partOf(uid);
             track.detach().forEach((element) => {
@@ -1322,8 +1660,20 @@ export function useCallkit(token: string | null): GarmaCallkit {
         // keeps the share tile honest when the sharer hits "پایان اشتراک".
         room.on(RoomEvent.TrackUnpublished, (publication, participant) => {
           if (roomRef.current !== r) return;
-          const uid = participant.identity;
-          const part = partsRef.current.get(uid);
+          const rawIdentity = participant.identity;
+          if (isAuxScreenIdentity(rawIdentity)) {
+            nativeAuxIdRef.current = null;
+            setNativeSharing(false);
+            const ownerPart = partsRef.current.get(baseIdentityOf(rawIdentity));
+            if (ownerPart && publication.source === Track.Source.ScreenShare) {
+              if (ownerPart.screenVideo?.publicationSid === publication.trackSid) {
+                clearPartVideo(ownerPart, "screen");
+                commitParts();
+              }
+            }
+            return;
+          }
+          const part = partsRef.current.get(rawIdentity);
           if (!part) return; // never subscribed → nothing to clean
           if (publication.source === Track.Source.Microphone) {
             part.micEls.forEach((el) => {
@@ -1354,6 +1704,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
         // ParticipantConnected + TrackSubscribed rebuilds the part from zero.
         room.on(RoomEvent.ParticipantDisconnected, (participant) => {
           if (roomRef.current !== r) return;
+          if (isAuxScreenIdentity(participant.identity)) {
+            // The MediaProjection session ended (stopped, revoked, service
+            // killed, phone unreachable): clean up immediately. Only the
+            // screen goes away — camera and microphone stay.
+            nativeAuxIdRef.current = null;
+            setNativeSharing(false);
+            const ownerPart = partsRef.current.get(baseIdentityOf(participant.identity));
+            if (ownerPart && clearPartVideo(ownerPart, "screen")) commitParts();
+            return;
+          }
           const part = partsRef.current.get(participant.identity);
           if (!part) return;
           part.micEls.forEach((el) => {
@@ -1370,6 +1730,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
         });
         room.on(RoomEvent.ParticipantConnected, (participant) => {
           if (roomRef.current !== r) return;
+          // Auxiliary screen-share companions are not people: their media is
+          // attributed to the owning user (see TrackSubscribed), so they never
+          // appear as a participant of their own.
+          if (isAuxScreenIdentity(participant.identity)) return;
           // Ensure the participant has a part the moment they enter the media
           // room (a late joiner who has not published anything yet still has a
           // row for the overlay's participant list).
@@ -1474,15 +1838,26 @@ export function useCallkit(token: string | null): GarmaCallkit {
           scheduleConnectRetry(s.callId, s.kind);
         });
 
-        await withTimeout(
+        // Bounded WITHOUT abandoning: a connect that answers after its
+        // deadline keeps running inside the SDK, so its late result is
+        // observed and the room it opened is closed again whenever it is no
+        // longer the call current room (the catch below already disconnected
+        // it, so this is what stops a late connect from resurrecting a live,
+        // publishing zombie room behind a call that already gave up on it).
+        const boundedConnect = deadline(
           r.connect(url, jwt, {
             maxRetries: 5,
             websocketTimeout: 20_000,
             peerConnectionTimeout: 25_000,
           }),
-          45_000,
+          CALL_OP_TIMEOUTS.connect,
           "connect_timeout",
         );
+        void boundedConnect.late.then((lateConnect) => {
+          if (!lateConnect.late) return;
+          if (roomRef.current !== r) safeDisconnect(r);
+        });
+        await boundedConnect.result;
         callVideoDebug("roomConnected", { callId });
 
         try {
@@ -1507,42 +1882,55 @@ export function useCallkit(token: string | null): GarmaCallkit {
           const p = camPub();
           return !!p?.track && !p.isMuted && p.track.mediaStreamTrack.readyState === "live";
         };
-        const micPub = () => r.localParticipant.getTrackPublication(Track.Source.Microphone);
-        const micLive = () => {
-          const p = micPub();
-          return !!p?.track && !p.isMuted;
-        };
-        const pause = (ms: number) => new Promise<void>((res) => window.setTimeout(res, ms));
-
-        await Promise.allSettled([
+        // Camera and microphone capture run CONCURRENTLY, and each is
+        // individually bounded and owner-checked: neither can wedge the other,
+        // and neither can outlive this lifecycle unnoticed.
+        const [camStarted, micStarted] = await Promise.all([
           enableCam
             ? captureCameraAt(startTier, { enable: true })
             : kind === "video" && restore
-              ? r.localParticipant.setCameraEnabled(false)
-              : Promise.resolve(),
-          r.localParticipant.setMicrophoneEnabled(enableMic),
+              ? r.localParticipant.setCameraEnabled(false).then(() => false)
+              : Promise.resolve(false),
+          enableMic ? startMicrophoneOwned(r, enableMic, owner) : Promise.resolve(true),
         ]);
-        // Verify each source ACTUALLY came up and give it one automatic
-        // retry — camera hardware on some Androids answers slowly or the
-        // first capture trips a transient error. A silent capture failure
-        // must never leave the call "connected" with no video/audio and no
-        // explanation.
-        if (enableMic && !micLive()) {
-          await pause(700);
-          if (!micLive()) await r.localParticipant.setMicrophoneEnabled(true).catch(() => {});
+
+        // ---- POST-AWAIT OWNERSHIP VERIFICATION ----
+        // The captures above may settle after the user hung up, after the room
+        // was replaced, or after a newer connect attempt superseded this one.
+        // Nothing below may touch React state or the live call in that case.
+        if (owner.disposed || !opCurrent(op, opRefs.current.connect) || roomRef.current !== r) {
+          return "cancelled";
         }
-        if (enableCam && !camLive()) {
-          await pause(700);
-          if (!camLive()) await captureCameraAt(startTier, { enable: true });
+
+        // Verify each source ACTUALLY came up and give it one automatic retry;
+        // each retry is itself bounded and owner-checked.
+        let micUp = !enableMic || (micStarted && micIsLive(r));
+        let camUp = !enableCam || (camStarted && camLive());
+        if (enableMic && !micUp) {
+          await sleep(CALL_OP_TIMEOUTS.micRetryDelay);
+          if (owner.disposed || !opCurrent(op, opRefs.current.connect) || roomRef.current !== r) {
+            return "cancelled";
+          }
+          micUp = (await startMicrophoneOwned(r, true, owner)) && micIsLive(r);
+        }
+        if (enableCam && !camUp) {
+          await sleep(CALL_OP_TIMEOUTS.micRetryDelay);
+          if (owner.disposed || !opCurrent(op, opRefs.current.connect) || roomRef.current !== r) {
+            return "cancelled";
+          }
+          camUp = (await captureCameraAt(startTier, { enable: true })) && camLive();
+        }
+        if (owner.disposed || !opCurrent(op, opRefs.current.connect) || roomRef.current !== r) {
+          return "cancelled";
         }
         setCamError(null);
         setMicError(null);
-        if (enableCam && !camLive()) {
+        if (enableCam && !camUp) {
           camIntentRef.current = false;
           setCamOn(false);
           setCamError(camFailureMessage(mediaDeniedRef.current));
         }
-        if (enableMic && !micLive()) {
+        if (enableMic && !micUp) {
           micIntentRef.current = false;
           setMicOn(false);
           setMicError(
@@ -1639,11 +2027,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
         } else if (res === "unauthorized" || res === "livekit_not_configured") {
           setError(res);
           try {
-            await endCallMut({
-              callId: call.callId,
-              token,
-              status: phase === "active" ? "ended" : "declined",
-            });
+            await withTimeout(
+              endCallMut({
+                callId: call.callId,
+                token,
+                status: phase === "active" ? "ended" : "declined",
+              }),
+              8_000,
+              "end_timeout",
+            );
           } catch {
             /* noop */
           }
@@ -1881,7 +2273,14 @@ export function useCallkit(token: string | null): GarmaCallkit {
         if (sessionRef.current) cleanup();
         let callId: Id<"calls">;
         try {
-          callId = await startCallMut({ conversationId, token, kind });
+          // Bounded: a mutation that never settles must not freeze the call
+          // button (and, if it did create the row, the reconcile effect still
+          // presents the outgoing ring so the user can cancel it).
+          callId = await withTimeout(
+            startCallMut({ conversationId, token, kind }),
+            20_000,
+            "start_timeout",
+          );
         } catch (e) {
           // Never fail silently: the caller's phone must say WHY the call
           // didn't go through (busy elsewhere vs. server/network trouble).
@@ -1923,7 +2322,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
         if (res === "unauthorized" || res === "livekit_not_configured") {
           setError(res);
           try {
-            await endCallMut({ callId, token, status: "declined" });
+            await withTimeout(
+              endCallMut({ callId, token, status: "declined" }),
+              8_000,
+              "end_timeout",
+            );
           } catch {
             /* noop */
           }
@@ -1969,7 +2372,10 @@ export function useCallkit(token: string | null): GarmaCallkit {
       clearRingTtl();
       void closeCallNotification(s.callId);
       try {
-        await answerCallMut({ callId: s.callId, token });
+        // Bounded: the answer must land, but a hung mutation must not leave the
+        // accept button spinning. If it truly did not land, the media connect
+        // below fails visibly and the call is reported honestly.
+        await withTimeout(answerCallMut({ callId: s.callId, token }), 10_000, "answer_timeout");
       } catch {
         /* noop */
       }
@@ -2009,7 +2415,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
       } else if (res === "unauthorized" || res === "livekit_not_configured") {
         setError(res);
         try {
-          await endCallMut({ callId: s.callId, token, status: "ended" });
+          await withTimeout(
+            endCallMut({ callId: s.callId, token, status: "ended" }),
+            8_000,
+            "end_timeout",
+          );
         } catch {
           /* noop */
         }
@@ -2035,6 +2445,60 @@ export function useCallkit(token: string | null): GarmaCallkit {
     token,
   ]);
 
+  /**
+   * Server convergence for an end/decline, WITHOUT holding the local
+   * lifecycle lock.
+   *
+   * Tapping the red button releases everything locally at once (see
+   * decline/hangup) and then calls this: the server row still has to end up
+   * right, so the mutation is retried a bounded number of times in the
+   * background. A hung or dead network can therefore delay the server update
+   * and nothing else — never the local teardown, and never the button.
+   */
+  const convergeEndCall = useCallback(
+    (callId: Id<"calls">, status: "ended" | "declined") => {
+      if (!token) return;
+      const prior = endConvergeRef.current;
+      if (prior?.timer != null) window.clearTimeout(prior.timer);
+      const state: { callId: Id<"calls">; status: "ended" | "declined"; attempts: number; timer: number | null } = {
+        callId,
+        status,
+        attempts: 0,
+        timer: null,
+      };
+      endConvergeRef.current = state;
+      const attempt = () => {
+        state.attempts += 1;
+        const bounded = deadline(
+          endCallMut({ callId, token, status }),
+          CALL_OP_TIMEOUTS.endMutation,
+          "end_timeout",
+        );
+        // The late result is observed so a mutation that answers after the
+        // deadline never surfaces as an unhandled rejection.
+        void bounded.late.then(() => {});
+        void bounded.result.then(
+          () => {
+            if (endConvergeRef.current === state) endConvergeRef.current = null;
+          },
+          () => {
+            if (endConvergeRef.current !== state) return; // superseded or torn down
+            if (state.attempts >= 5) {
+              // Stop retrying here; the reconcile effect re-sends the end
+              // whenever connectivity returns, and leaveRef keeps the UI from
+              // re-presenting this call.
+              endConvergeRef.current = null;
+              return;
+            }
+            state.timer = window.setTimeout(attempt, Math.min(1_000 * state.attempts, 8_000));
+          },
+        );
+      };
+      attempt();
+    },
+    [endCallMut, token],
+  );
+
   const decline = useCallback(async () => {
     // CANCELLATION AVAILABILITY: busy no longer blocks the end button. The
     // accept path can hold busy for many seconds (primeMedia + the media
@@ -2044,9 +2508,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
     if (endingRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
-    busyRef.current = true;
     endingRef.current = true;
-    setBusy(true);
     try {
       stopRing();
       void closeCallNotification(s.callId);
@@ -2054,19 +2516,15 @@ export function useCallkit(token: string | null): GarmaCallkit {
       // DISPOSE FIRST: the red button ends THIS device's participation the
       // instant it is pressed — ring, room, captured mic/camera/screen all
       // die now, not after a (possibly hung or offline) server round-trip.
-      // The leaveRef retry loop guarantees the server row still converges.
       cleanup();
-      try {
-        await endCallMut({ callId: s.callId, token, status: "declined" });
-      } catch {
-        /* leaveRef retries when connectivity returns */
-      }
+      // ...and never WAIT for the server: convergence runs in the background,
+      // so a dead link cannot make this button look stuck or block the next
+      // tap. leaveRef keeps the call from being re-presented meanwhile.
+      convergeEndCall(s.callId, "declined");
     } finally {
       endingRef.current = false;
-      busyRef.current = false;
-      setBusy(false);
     }
-  }, [cleanup, endCallMut, stopRing, token]);
+  }, [cleanup, convergeEndCall, stopRing, token]);
 
   const hangup = useCallback(async () => {
     // CANCELLATION AVAILABILITY: busy no longer blocks the end button. The
@@ -2077,55 +2535,62 @@ export function useCallkit(token: string | null): GarmaCallkit {
     if (endingRef.current) return;
     const s = sessionRef.current;
     if (!s || !token) return;
-    busyRef.current = true;
     endingRef.current = true;
-    setBusy(true);
     try {
       stopRing();
       void closeCallNotification(s.callId);
       const wasActive = s.phase === "active";
-      leaveRef.current = { callId: s.callId, wanted: wasActive ? "ended" : "declined" };
+      const wanted: "ended" | "declined" = wasActive ? "ended" : "declined";
+      leaveRef.current = { callId: s.callId, wanted };
       // DISPOSE FIRST: the red button ends THIS device's participation the
       // instant it is pressed — ring, room, captured mic/camera/screen all
       // die now, not after a (possibly hung or offline) server round-trip.
-      // The leaveRef retry loop guarantees the server row still converges.
       cleanup();
-      try {
-        await endCallMut({ callId: s.callId, token, status: wasActive ? "ended" : "declined" });
-      } catch {
-        /* leaveRef retries when connectivity returns */
-      }
+      // ...and never WAIT for the server. A hung endCallMut() must not make
+      // the call screen linger or the red button look stuck: the mutation
+      // converges in the background while the UI is already back to normal.
+      convergeEndCall(s.callId, wanted);
     } finally {
       endingRef.current = false;
-      busyRef.current = false;
-      setBusy(false);
     }
-  }, [cleanup, endCallMut, stopRing, token]);
+  }, [cleanup, convergeEndCall, stopRing, token]);
 
   // ---- Controls (routed through LiveKit) ----
   const toggleMic = useCallback(async () => {
     const room = roomRef.current;
-    // Serialize taps and bound the toggle: an unbounded setMicrophoneEnabled
-    // can hang on some Androids and silently desync intent/track/UI.
-    if (!room || micBusyRef.current) return;
+    const owner = ownerRef.current;
+    if (!room || !owner || owner.disposed || micBusyRef.current) return;
     const next = !micOn;
+    const previousIntent = micIntentRef.current;
     micBusyRef.current = true;
     try {
-      try {
-        await withTimeout(room.localParticipant.setMicrophoneEnabled(next), 10_000, "mic_toggle_timeout");
-        micIntentRef.current = next;
+      // Bounded + owned: a hung publish cannot wedge the control, and a late
+      // capture is released instead of listening on with no call behind it.
+      const ok = await startMicrophoneOwned(room, next, owner);
+      // Post-await ownership: the call may be over, or a newer call may own
+      // the room by now. Never commit state to a lifecycle that is gone.
+      if (owner.disposed || roomRef.current !== room) return;
+      if (ok || !next) {
         setMicOn(next);
-      } catch {
+      } else {
+        micIntentRef.current = previousIntent;
         setMicError("تغییر وضعیت میکروفون ممکن نشد؛ دوباره تلاش کن");
       }
     } finally {
-      micBusyRef.current = false;
+      // OWNERSHIP OF THE LOCK: startMicrophoneOwned can wait out a full
+      // microphone deadline, and the user may hang up and start a NEW call
+      // inside that window. Only the lifecycle that took this lock may
+      // release it; otherwise the obsolete operation would un-latch the new
+      // call microphone control mid-publish. Teardown already released the
+      // dead lifecycle lock.
+      if (owner === ownerRef.current) micBusyRef.current = false;
     }
-  }, [micOn]);
+  }, [micOn, startMicrophoneOwned]);
 
   const toggleCam = useCallback(async () => {
     const room = roomRef.current;
-    if (!room || tierBusyRef.current) return;
+    const owner = ownerRef.current;
+    if (!room || !owner || owner.disposed || tierBusyRef.current) return;
     const next = !camOn;
     setCamError(null);
     if (!next) {
@@ -2139,15 +2604,22 @@ export function useCallkit(token: string | null): GarmaCallkit {
           10_000,
           "cam_mute_timeout",
         );
+        // Ownership: the call may have ended while the mute was settling.
+        if (owner.disposed || roomRef.current !== room) return;
         setCamOn(false);
       } catch {
+        if (owner.disposed || roomRef.current !== room) return;
         camIntentRef.current = true;
         setCamError("خاموش کردن دوربین ممکن نشد؛ دوباره تلاش کن");
       }
       return;
     }
     camIntentRef.current = true;
-    if (await captureCameraAt(desiredTier(), { enable: true })) {
+    const started = await captureCameraAt(desiredTier(), { enable: true });
+    // captureCameraAt already verifies its own ownership; re-check here so a
+    // hung-up call can never get its camera flag flipped back on.
+    if (owner.disposed || roomRef.current !== room) return;
+    if (started) {
       setCamOn(true);
     } else {
       camIntentRef.current = false;
@@ -2163,6 +2635,19 @@ export function useCallkit(token: string | null): GarmaCallkit {
     // live capture to swap). The flip button is hidden while the camera is
     // off, so this only guards a tap racing the state update.
     if (!camIntentRef.current) return;
+    // OWNERSHIP: flipping the camera is an owned operation of the current
+    // lifecycle. It is superseded by a newer flip and cancelled by hangup, so
+    // a late completion can never set the preview, camFacing, camOn,
+    // lastCamId, or restart the camera of a different call.
+    const owner =
+      ownerRef.current ??
+      createOwner(sessionRef.current?.callId ?? null, sessionRef.current?.kind ?? "video");
+    if (!ownerRef.current) ownerRef.current = owner;
+    cancelOp(opRefs.current.switch);
+    const op = createOp(owner, "switch");
+    opRefs.current.switch = op;
+    const switchStillCurrent = () =>
+      !owner.disposed && opCurrent(op, opRefs.current.switch) && roomRef.current === room;
     const { Track } = livekit();
     const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
     const pubTrack = pub?.track;
@@ -2178,12 +2663,27 @@ export function useCallkit(token: string | null): GarmaCallkit {
     // Physical cameras with distinct ids (Android/desktop): cycle the list.
     let cams: MediaDeviceInfo[] = [];
     try {
-      cams = (await navigator.mediaDevices.enumerateDevices())
+      // Bounded: some Android builds can stall device enumeration, and a
+      // camera flip must never be wedged by it (facingMode still works).
+      cams = (
+        await withTimeout(
+          navigator.mediaDevices.enumerateDevices(),
+          5_000,
+          "enumerate_timeout",
+        )
+      )
         .filter((d) => d.kind === "videoinput" && d.deviceId)
         .filter((d, i, all) => all.findIndex((x) => x.deviceId === d.deviceId) === i);
     } catch {
       /* fall back to facingMode */
     }
+    // POST-AWAIT OWNERSHIP GATE: the flip above awaited device enumeration, so
+    // the user may have hung up (or a newer call / newer flip may own the
+    // camera) by now. Nothing — not even a UI counter — may be committed to a
+    // lifecycle that is no longer current. The busy lock has not been taken
+    // yet here (the entry guard refuses while it is held), so there is nothing
+    // to release on the way out.
+    if (!switchStillCurrent()) return;
     setCamCount(cams.length);
     const settings = pubTrack.mediaStreamTrack?.getSettings() ?? {};
     const curId = (settings.deviceId || lastCamIdRef.current) || "";
@@ -2208,8 +2708,27 @@ export function useCallkit(token: string | null): GarmaCallkit {
     const base = { resolution: plan.resolution, frameRate: plan.frameRate };
     const previous = lastCamIdRef.current;
     const previousFacing = curFacing;
-    const restart = (opts: { deviceId?: { exact: string }; facingMode?: "user" | "environment" }) =>
-      withTimeout(camTrack.restartTrack({ ...base, ...opts }), 15_000, "cam_switch_timeout");
+    const restart = (opts: { deviceId?: { exact: string }; facingMode?: "user" | "environment" }) => {
+      const bounded = deadline(
+        camTrack.restartTrack({ ...base, ...opts }),
+        CALL_OP_TIMEOUTS.cameraSwitch,
+        "cam_switch_timeout",
+      );
+      // A restartTrack that answers after its deadline has already replaced
+      // the publication capture inside the SDK. When the lifecycle (or the
+      // room) this flip belonged to is gone, that fresh capture is ours to
+      // release: the teardown sweep ran before it existed, so nothing else
+      // would ever stop it, and leaving it live means a camera with no call.
+      // (While the flip is still current, about to be superseded, or the room
+      // is still the live one, the publication keeps it deliberately.)
+      void bounded.late.then((lateRestart) => {
+        if (!lateRestart.late) return;
+        if (owner.disposed || roomRef.current !== room) {
+          safeStopTrack(camTrack.mediaStreamTrack);
+        }
+      });
+      return bounded.result;
+    };
 
     tierBusyRef.current = true;
     setCamError(null);
@@ -2245,6 +2764,16 @@ export function useCallkit(token: string | null): GarmaCallkit {
         /* try the next strategy */
       }
     }
+    // THE OWNERSHIP GATE: after every await above (enumerateDevices,
+    // restartTrack, the facingMode fallback, the fresh re-publish) this flip
+    // may have become obsolete — the user hung up, a newer call owns the
+    // room, or a newer flip superseded this one. Nothing may be committed
+    // then, and the busy lock is released before returning.
+    if (!switchStillCurrent()) {
+      // Never steal a newer lifecycle's lock on the way out.
+      if (owner === ownerRef.current) tierBusyRef.current = false;
+      return;
+    }
     // Read the LIVE publication afterwards: in-place restarts keep the same
     // publication, but the fresh-publish fallback replaces it, so the stale
     // `pub` handle above would point at an ended track after a fallback.
@@ -2270,108 +2799,270 @@ export function useCallkit(token: string | null): GarmaCallkit {
       setCamFacing(previousFacing);
       setCamError("تعویض دوربین ممکن نشد؛ دوباره تلاش کن");
     }
-    tierBusyRef.current = false;
+    if (owner === ownerRef.current) tierBusyRef.current = false;
   }, [captureCameraAt]);
 
   /**
-   * Screen share — hardened:
-   * - state is driven by the actual LiveKit publication events, so a failed
-   *   capture or a cancelled browser picker can never leave the UI believing
-   *   it is sharing (or believing it isn't while a track is live).
-   * - errors surface to the user in Persian instead of silently doing nothing.
-   * - double-taps are serialized; LiveKit's own pending-publication handling
-   *   would otherwise queue two captures on a fast double tap.
+   * Screen share — DUAL PATH, owner/op aware.
+   *
+   * Web path (browsers that really implement display capture):
+   * - the capture call happens inside the user's tap (browsers only allow
+   *   getDisplayMedia from a gesture);
+   * - it is bounded with `deadline`, so a picker that never answers still
+   *   gives control back, and a capture that lands late is disposed of;
+   * - the live publication and the native track's own `ended` event are
+   *   followed, so `sharing`/`screenLocal` can never lie (an OS "stop
+   *   sharing" tap ends the share for everyone, including us).
+   *
+   * Android path (Chrome/WebView on Android has no working web display
+   * capture, and NO JavaScript can create one): the server mints a one-time,
+   * short-lived handoff code and we launch the MediaProjection companion with
+   * nothing but that opaque code. The companion publishes into the SAME room
+   * as the auxiliary "<userId>:screen" participant, which we recognise as
+   * this user's own share. No credential ever travels through the deep link.
+   *
+   * Anything else gets the truthful "unsupported here" message.
    */
   const toggleShare = useCallback(async () => {
     const room = roomRef.current;
-    if (!room || shareBusyRef.current) return;
-    const next = !sharingRef.current;
-    // Some Android WebViews expose getDisplayMedia but never open a picker
-    // (or the platform simply has no screen-capture API) — answer with a
-    // clear message instead of a silent no-op.
-    if (next && typeof navigator.mediaDevices?.getDisplayMedia !== "function") {
-      setShareError(
-        IS_IOS
-          ? "سافاری آیفون و آی‌پد اجازه نمی‌دهد وب‌سایت صفحهٔ گوشی را بفرستد؛ برای اشتراک صفحه از گوشی اندروید یا کامپیوتر استفاده کن."
-          : IS_EMBEDDED
-            ? "اشتراک صفحه در این نمای جاسازی‌شده قفل است؛ لینک اپ را مستقیم در مرورگر باز کن."
-            : "اشتراک صفحه در این مرورگر پشتیبانی نمی‌شود؛ کروم یا فایرفاکس را امتحان کن.",
-      );
-      return;
-    }
-    if (next && IS_EMBEDDED) {
-      setShareError("اشتراک صفحه در این نمای جاسازی‌شده قفل است؛ لینک اپ را مستقیم در مرورگر باز کن.");
-      return;
-    }
-    shareBusyRef.current = true;
-    try {
-      setShareError(null);
-      if (next) setShareStarting(true);
+    if (!room || shareBusyRef.current || !token) return;
+    const owner = ownerRef.current;
+    if (!owner || owner.disposed) return;
+    const env = currentShareEnvironment();
+    const path = resolveScreenSharePath(env);
+    setSharePath(path);
+    const nativeLive = nativeAuxIdRef.current !== null;
+    const next = !(sharingRef.current || nativeLive);
+
+    // ---- STOP ----
+    if (!next) {
+      if (nativeLive) {
+        // The Android companion owns the capture: ask it to stop. It also
+        // polls the call state, so this cannot leave a capture running.
+        requestNativeShareStop(room, nativeAuxIdRef.current as string);
+        return;
+      }
+      shareBusyRef.current = true;
       try {
-        const capture = () =>
-          room.localParticipant.setScreenShareEnabled(
-            next,
-            {
-              // No resolution request on purpose: on Safari 17 specifying a
-              // resolution makes getDisplayMedia capture far below it.
-              audio: false,
-              selfBrowserSurface: "include",
-              surfaceSwitching: "include",
-            },
-            {
-              // Screen sharing is the hungriest thing on the link; publishing
-              // it uncapped could starve voice/video on a weak uplink. Single
-              // layer (simulcast off) keeps the SFU cost low for 2–3 viewers.
-              simulcast: false,
-              screenShareEncoding: { maxBitrate: 2_000_000, maxFramerate: 15 },
-            },
-          );
-        // Bound the picker wait so the button always answers the user instead
-        // of dying silently when the browser never shows/returns a picker.
-        const pub = next ? await withTimeout(capture(), 20_000, "share_timeout") : await capture();
-        if (next && !pub && !sharingRef.current) {
-          setShareError("اشتراک صفحه شروع نشد؛ دوباره تلاش کن");
-        }
-      } catch (e) {
-        if (!next) {
-          // Stopping never really fails; ignore.
-        } else {
-          const name = e instanceof DOMException ? e.name : "";
-          const msg = e instanceof Error ? e.message : "";
-          setShareError(
-            msg === "share_timeout"
-              ? IS_EMBEDDED
-                ? "پنجرهٔ انتخاب صفحه باز نشد — این نمای جاسازی‌شده اجازهٔ اشتراک صفحه نمی‌دهد؛ اپ را مستقیم در مرورگر باز کن."
-                : /Android/i.test(navigator.userAgent)
-                  ? "در پنجرهٔ سیستم «شروع/ضبط» را بزن تا صفحه‌ات فرستاده شود."
-                  : "انتخاب صفحه خیلی طول کشید؛ دوباره تلاش کن"
-              : name === "NotAllowedError" || /permission|cancel/i.test(msg)
-                ? IS_IOS
-                  ? "سافاری آیفون اجازهٔ اشتراک صفحه نمی‌دهد؛ از اندروید یا کامپیوتر استفاده کن."
-                  : /Android/i.test(navigator.userAgent)
-                    ? "در پنجرهٔ سیستم «شروع/ضبط» را بزن تا اجازهٔ اشتراک داده شود."
-                    : "برای اشتراک صفحه باید اجازه بدهی (گزینهٔ مورد نظر را انتخاب و تأیید کن)."
-                : "اشتراک صفحه ممکن نشد؛ دوباره تلاش کن",
-          );
-        }
-        // Keep the UI honest even if LiveKit got confused: if no track is
-        // actually live, clear any stale sharing flag.
-        const existing = room.localParticipant.getTrackPublications().find(
-          (p) => p.source === "screen_share",
+        const bounded = deadline(
+          room.localParticipant.setScreenShareEnabled(false),
+          CALL_OP_TIMEOUTS.share,
+          "share_stop_timeout",
         );
-        if (!existing && sharingRef.current) {
-          setSharing(false);
-          sharingRef.current = false;
-        }
+        void bounded.late.then(() => {});
+        await bounded.result;
+      } catch {
+        /* stopping never really fails; publication events decide the UI */
       } finally {
+        shareBusyRef.current = false;
+      }
+      return;
+    }
+
+    if (path === "unsupported") {
+      setShareError(unsupportedScreenShareMessage(env));
+      return;
+    }
+
+    // ---- ANDROID MEDIAPROJECTION COMPANION ----
+    if (path === "android-native") {
+      cancelOp(opRefs.current.share);
+      const op = createOp(owner, "share");
+      opRefs.current.share = op;
+      shareBusyRef.current = true;
+      setShareStarting(true);
+      setShareError(null);
+      try {
+        const callId = sessionRef.current?.callId;
+        if (!callId) return;
+        // Bounded: a hung server round-trip must not leave the share button
+        // spinning forever. A code that is minted late simply expires unused.
+        const handoff = await withTimeout(
+          requestShareHandoff({ token, callId }),
+          15_000,
+          "handoff_timeout",
+        );
+        // OWNERSHIP AFTER AWAIT: the user may have hung up while the server
+        // was minting the code — never launch a companion for a dead call.
+        if (!opCurrent(op, opRefs.current.share) || owner.disposed || roomRef.current !== room) {
+          return;
+        }
+        // ONLY the opaque one-time code travels in the deep link, plus a way
+        // back here when the companion is not installed. The companion uses
+        // the deployment URL baked into its own build, so a crafted link can
+        // never point it (and the code) at an attacker's server.
+        const fallbackUrl =
+          window.location.origin + window.location.pathname + "?screen-share=no-companion";
+        window.location.href = androidCompanionLaunchUrl(handoff.code, fallbackUrl);
+      } catch {
+        if (owner.disposed || roomRef.current !== room) return;
+        setShareError(
+          "اشتراک صفحهٔ اندروید آماده نشد؛ یک بار دیگر تلاش کن و اگر «اپ همراه» نصب نیست آن را نصب کن.",
+        );
+      } finally {
+        // Only the lifecycle that started this attempt may clear its own
+        // flags: a late completion from a dead call must never un-latch a NEW
+        // call share button (or paint its starting spinner off).
+        if (owner === ownerRef.current) {
+          setShareStarting(false);
+          shareBusyRef.current = false;
+        }
+      }
+      return;
+    }
+
+    // ---- WEB DISPLAY CAPTURE ----
+    cancelOp(opRefs.current.share);
+    const op = createOp(owner, "share");
+    opRefs.current.share = op;
+    shareBusyRef.current = true;
+    setShareStarting(true);
+    setShareError(null);
+    try {
+      const bounded = deadline(
+        room.localParticipant.setScreenShareEnabled(
+          true,
+          {
+            // No resolution request on purpose: on Safari 17 specifying a
+            // resolution makes getDisplayMedia capture far below it.
+            audio: false,
+            selfBrowserSurface: "include",
+            surfaceSwitching: "include",
+          },
+          {
+            // Screen sharing is the hungriest thing on the link; publishing it
+            // uncapped could starve voice/video on a weak uplink. Single layer
+            // (simulcast off) keeps the SFU cost low for 2–3 viewers.
+            simulcast: false,
+            screenShareEncoding: { maxBitrate: 2_000_000, maxFramerate: 15 },
+          },
+        ),
+        CALL_OP_TIMEOUTS.share,
+        "share_timeout",
+      );
+      // LATE RESULT: a picker/capture that answers after the deadline (or
+      // after a hangup) keeps running in the browser, so release the track it
+      // produced — but never one that is still the room's live publication.
+      void bounded.late.then((r) => {
+        if (!r.late) return;
+        const pub = r.value as { track?: { mediaStreamTrack?: MediaStreamTrack } } | null | undefined;
+        releaseLateTrack({
+          lateTrack: pub?.track?.mediaStreamTrack ?? null,
+          currentTrack: () => {
+            if (roomRef.current !== room) return null;
+            try {
+              return (
+                room.localParticipant
+                  .getTrackPublications()
+                  .find((p) => p.source === "screen_share")?.track?.mediaStreamTrack ?? null
+              );
+            } catch {
+              return null;
+            }
+          },
+          opStillCurrent: opCurrent(op, opRefs.current.share),
+        });
+      });
+      const pub = await bounded.result;
+      const stillOurs = opCurrent(op, opRefs.current.share) && !owner.disposed && roomRef.current === room;
+      if (!stillOurs) {
+        // Hung up (or superseded) mid-picker: the capture arrived after the
+        // teardown sweep, so release the track it produced. A track that is
+        // still the room's live screen publication is left alone.
+        releaseLateTrack({
+          lateTrack: (pub as { track?: { mediaStreamTrack?: MediaStreamTrack } } | null)?.track
+            ?.mediaStreamTrack,
+          currentTrack: () => {
+            if (roomRef.current !== room) return null;
+            try {
+              return (
+                room.localParticipant
+                  .getTrackPublications()
+                  .find((p) => p.source === "screen_share")?.track?.mediaStreamTrack ?? null
+              );
+            } catch {
+              return null;
+            }
+          },
+          opStillCurrent: false,
+        });
+        return;
+      }
+      if (!pub && !sharingRef.current) {
+        setShareError("اشتراک صفحه شروع نشد؛ دوباره تلاش کن");
+      } else {
+        // A capture that really produced a track proves this device's web
+        // path works, so any remembered failure is cleared.
+        clearWebDisplayCaptureBroken();
+        setSharePath("web");
+        // Follow the browser's own "stop sharing" control.
+        const track = (pub as { track?: { mediaStreamTrack?: MediaStreamTrack } } | null)?.track
+          ?.mediaStreamTrack;
+        if (track) {
+          const onEnded = () => {
+            // The share was ended by the browser/OS. Same ownership gate as
+            // every other late callback: only the CURRENT share operation of
+            // the LIVE lifecycle may clear the share state, so a stale
+            // capture cannot tear down a newer share on the same call.
+            if (owner.disposed || roomRef.current !== room) return;
+            if (!opCurrent(op, opRefs.current.share)) return;
+            setScreenLocal(null);
+            setSharing(false);
+            sharingRef.current = false;
+            void room.localParticipant.setScreenShareEnabled(false).catch(() => {});
+          };
+          track.addEventListener("ended", onEnded, { once: true });
+        }
+      }
+    } catch (e) {
+      if (owner.disposed || roomRef.current !== room) return; // hung up mid-picker
+      const name = e instanceof DOMException ? e.name : "";
+      const msg = e instanceof Error ? e.message : "";
+      // The API existed but the platform could not deliver a capture: remember
+      // it so the next tap goes straight to the Android companion instead of
+      // failing the same way twice. Never guessed — only after a real failure.
+      if (
+        env.android &&
+        (name === "NotSupportedError" || name === "TypeError" || msg === "share_timeout")
+      ) {
+        markWebDisplayCaptureBroken();
+        setSharePath(resolveScreenSharePath({ ...env, webKnownBroken: true }));
+        setShareError("اشتراک صفحهٔ وب روی این گوشی کار نمی‌کند؛ دکمه را دوباره بزن تا با اپ همراه اندروید برویم.");
+      } else {
+        setShareError(shareFailureMessage(env, name, msg));
+      }
+      // Keep the UI honest even if the SDK got confused: if no screen track is
+      // actually live, clear any stale sharing flag.
+      const existing = room.localParticipant
+        .getTrackPublications()
+        .find((p) => p.source === "screen_share");
+      if (!existing && sharingRef.current) {
+        setSharing(false);
+        sharingRef.current = false;
+      }
+    } finally {
+      // Same lock-ownership rule as the companion branch above: a capture
+      // that answers after a hangup (or after a newer call took over) must
+      // not touch the newer lifecycle share flags.
+      if (owner === ownerRef.current) {
         setShareStarting(false);
         shareBusyRef.current = false;
       }
-    } finally {
-      shareBusyRef.current = false;
     }
-  }, []);
+  }, [requestShareHandoff, token]);
 
+  /**
+   * Remote-audio on/off — HONESTLY named.
+   *
+   * The Web platform exposes no API that can force physical speaker/earpiece
+   * routing on a phone; what a web app can do is mute the incoming audio
+   * elements, which is exactly what this does (volume 0 <-> 1). It is
+   * therefore surfaced as «صدای مخاطب» (remote audio), NOT as "speaker
+   * routing", and no claim is made that it moves the sound to the loudspeaker.
+   * Genuine routing belongs to the platform: the Android screen-share
+   * companion uses Android's AudioManager for the session it owns, and the OS
+   * call-routing controls handle the rest.
+   */
   const toggleSpeaker = useCallback(() => {
     setSpeakerOn((current) => {
       const next = !current;
@@ -2399,7 +3090,11 @@ export function useCallkit(token: string | null): GarmaCallkit {
     micOn,
     camOn,
     speakerOn,
-    sharing,
+    // The single truthful "am I sharing?" flag: my own browser capture OR my
+    // Android companion publishing into this call.
+    sharing: sharing || nativeSharing,
+    nativeSharing,
+    sharePath,
     shareStarting,
     shareError,
     clearShareError,
