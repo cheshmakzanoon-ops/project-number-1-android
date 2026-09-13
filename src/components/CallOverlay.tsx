@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   CameraOff,
   Camera,
@@ -77,6 +77,45 @@ export function CallOverlay({
     return () => document.removeEventListener("fullscreenchange", onFullscreen);
   }, []);
 
+  /**
+   * Make the call screen the ONLY thing on the display, as far as the web
+   * platform permits: the Fullscreen API removes every browser/OS bar around
+   * the page, so the ring covers the whole screen.
+   *
+   * Browsers only honour it with transient user activation, and a call can
+   * arrive with no gesture at all (an incoming push), so this is best-effort:
+   * it succeeds when the call was just started/answered by a tap, and the
+   * one-time first-touch fallback below recovers it otherwise. Failures are
+   * silent — the overlay is `fixed inset-0` and already covers the viewport.
+   */
+  const tryFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el || document.fullscreenElement) return;
+    try {
+      void el.requestFullscreen?.().catch(() => {});
+    } catch {
+      /* unsupported here (e.g. iOS Safari) — the overlay still covers the app */
+    }
+  }, []);
+
+  useEffect(() => {
+    tryFullscreen();
+    // The ring can appear without any gesture (an incoming call), where the
+    // request above is refused. The user's very next touch anywhere on it IS
+    // a gesture, so the takeover lands then instead of never.
+    const onFirstTouch = () => tryFullscreen();
+    window.addEventListener("pointerdown", onFirstTouch, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", onFirstTouch);
+      // Never leave the document stuck in fullscreen once this call's screen
+      // is gone — but only release the mode THIS overlay entered, never a
+      // fullscreen the user set up themselves.
+      if (document.fullscreenElement === containerRef.current) {
+        void document.exitFullscreen?.().catch(() => {});
+      }
+    };
+  }, [tryFullscreen]);
+
   // Defensive: a session built from a row is always normalized to have a
   // peers array, but a crash here unmounts the app to a black screen — so
   // never trust it blindly.
@@ -124,6 +163,19 @@ export function CallOverlay({
       sentinel = null;
     };
   }, []);
+
+  // Minimizing means "let me use the app while the call runs", so give the
+  // browser chrome back then; restoring the call screen takes the whole
+  // display over again.
+  useEffect(() => {
+    if (hidden) {
+      if (document.fullscreenElement === containerRef.current) {
+        void document.exitFullscreen?.().catch(() => {});
+      }
+    } else {
+      tryFullscreen();
+    }
+  }, [hidden, tryFullscreen]);
 
   // Auto-dismiss the screen-share error toast after a few seconds.
   const [showShareErr, setShowShareErr] = useState(false);
@@ -415,7 +467,12 @@ export function CallOverlay({
                 <ColAction
                   label={busy ? "در حال اتصال…" : session.joinOffer ? "پیوستن" : "پاسخ"}
                   tone="sage"
-                  onClick={kit.accept}
+                  onClick={() => {
+                    // Answering is a user gesture, so this is the reliable
+                    // moment to take over the whole screen.
+                    tryFullscreen();
+                    void kit.accept();
+                  }}
                   disabled={busy}
                 >
                   <Phone size={28} style={{ transform: "scaleX(-1)" }} />

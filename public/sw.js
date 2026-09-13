@@ -9,7 +9,7 @@
  * cache name is what actually evicts stale icons/shell from phones that
  * already installed the app.
  */
-const CACHE = "garma-shell-v5";
+const CACHE = "garma-shell-v6";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -59,6 +59,33 @@ self.addEventListener("push", (event) => {
       // screen locked — goes through the OS notification below, which is
       // exactly the "rings no matter what" path for an installed app.
       if (clients.some((c) => c.visibilityState === "visible")) return;
+
+      // BEST-EFFORT TAKEOVER: the app is open but sitting behind another
+      // app/tab. Focus its window so the in-app ring screen — which covers
+      // the entire viewport — is what the user actually sees, instead of a
+      // notification banner.
+      //
+      // Two hard web-platform limits remain, and no JavaScript can lift them:
+      //   1. a CLOSED app cannot be launched from a push event (openWindow()
+      //      requires a user gesture a push does not have);
+      //   2. a full-screen takeover over another app, or on a locked/asleep
+      //      screen, is Android's Full-Screen Intent / iOS CallKit — native
+      //      APIs a PWA cannot reach. The notification below is the
+      //      guaranteed path for both.
+      for (const c of clients) {
+        if (!("focus" in c)) continue;
+        try {
+          await c.focus();
+        } catch {
+          break; // focus refused; fall through to the notification
+        }
+        // Only trust focus when the window REALLY became visible; otherwise
+        // the user would get no ring at all.
+        await new Promise((r) => setTimeout(r, 120));
+        const after = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        if (after.some((x) => x.visibilityState === "visible")) return;
+        break;
+      }
 
       const notif = {
         // Body comes from the server so the wording matches the call kind
