@@ -135,7 +135,7 @@ describe("Android companion launch URL", () => {
     expect(decodeURIComponent(url)).toContain("browser_fallback_url=https://localhost/");
   });
 
-  it("points users at the companion package to install", () => {
-    expect(ANDROID_COMPANION_INSTALL_URL).toContain(ANDROID_COMPANION_PACKAGE);
+  it("points users to the bundled guide rather than an unverified store listing", () => {
+    expect(ANDROID_COMPANION_INSTALL_URL).toBe("/screen-share-help.html");
   });
 });

@@ -1,0 +1,85 @@
+name: Build signed family companion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: family-apk
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require the owner's persistent signing identity
+        env:
+          KEYSTORE_BASE64: ${{ secrets.GARMA_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.GARMA_ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.GARMA_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.GARMA_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_BASE64" || -z "$STORE_PASSWORD" || -z "$KEY_ALIAS" || -z "$KEY_PASSWORD" ]]; then
+            echo '::error::Configure all four GARMA_ANDROID signing secrets. A disposable CI key is not a family release identity.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/family-signing.jks"
+          test -s "$RUNNER_TEMP/family-signing.jks"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build and verify the release variant
+        working-directory: android
+        env:
+          GARMA_ANDROID_KEYSTORE: ${{ runner.temp }}/family-signing.jks
+          GARMA_ANDROID_STORE_PASSWORD: ${{ secrets.GARMA_ANDROID_STORE_PASSWORD }}
+          GARMA_ANDROID_KEY_ALIAS: ${{ secrets.GARMA_ANDROID_KEY_ALIAS }}
+          GARMA_ANDROID_KEY_PASSWORD: ${{ secrets.GARMA_ANDROID_KEY_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease :app:lintRelease :app:testReleaseUnitTest
+      - name: Check package identity, signature and tests
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$RUNNER_TEMP/family-badging.txt"
+          grep -q "package: name='com.garma.screenshare'" "$RUNNER_TEMP/family-badging.txt"
+          if grep -q 'application-debuggable' "$RUNNER_TEMP/family-badging.txt"; then exit 1; fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          cases = [c for p in Path('android/app/build/test-results/testReleaseUnitTest').glob('TEST-*.xml') for c in ET.parse(p).getroot().iter('testcase')]
+          assert len(cases) >= 12, 'Native tests missing'
+          assert not any(c.find(tag) is not None for c in cases for tag in ['failure', 'error', 'skipped']), 'Native tests failed or skipped'
+          PY
+          mkdir -p family-package
+          cp "$APK" family-package/garma-screenshare.apk
+          printf '%s\n' "$GITHUB_SHA" > family-package/commit.txt
+          (cd family-package && sha256sum garma-screenshare.apk > SHA256SUMS)
+      - name: Upload the signed APK for the owner to share privately
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-family-companion-${{ github.sha }}
+          path: family-package/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove signing material
+        if: ${{ always() }}
+        run: rm -f "$RUNNER_TEMP/family-signing.jks"

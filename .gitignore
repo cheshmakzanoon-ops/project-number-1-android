@@ -5,3 +5,14 @@ node_modules/
 dist/
 isolate/
 *.tsbuildinfo
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+android/local.properties
+android/.gradle/
+android/**/build/
+family-package/
+e2e-results/

@@ -10,6 +10,7 @@ function fixture() {
   mkdirSync(join(dir,"assets/nested"),{recursive:true});mkdirSync(join(dir,"icons"));
   writeFileSync(join(dir,"index.html"),"<html>bundle</html>");
   writeFileSync(join(dir,"manifest.webmanifest"),"{}");
+  writeFileSync(join(dir,"screen-share-help.html"),"<html>installation guide</html>");
   for(const icon of ["icon.svg","icon-192.png","icon-512.png","apple-touch-icon.png","icon-maskable.png"]) writeFileSync(join(dir,"icons",icon),"icon");
   writeFileSync(join(dir,"assets/index-hash.js"),"console.log('app')");
   writeFileSync(join(dir,"assets/nested/call-hash.js"),"console.log('call')");
@@ -31,7 +32,7 @@ it("precaches every compiled runtime asset, including lazy nested chunks",()=>{
 it("assigns deterministic revisions to identical builds",()=>{
   const dir=fixture();expect(pack(dir).revision).toBe(pack(dir).revision);
 });
-it.each(["assets/nested/call-hash.js","index.html","icons/icon-192.png","manifest.webmanifest"])("updates the shell revision when %s changes",file=>{
+it.each(["assets/nested/call-hash.js","index.html","icons/icon-192.png","manifest.webmanifest","screen-share-help.html"])("updates the shell revision when %s changes",file=>{
   const dir=fixture(),before=pack(dir).revision;writeFileSync(join(dir,file),"changed");expect(pack(dir).revision).not.toBe(before);
 });
 it("does not silently ship an unversioned worker if the template contract is missing",()=>{
@@ -42,4 +43,13 @@ it("the production HTML has CSP, no inline script and permits accessibility zoom
   const html=readFileSync("index.html","utf8");
   expect(html).toContain('http-equiv="Content-Security-Policy"');expect(html).not.toMatch(/onload\s*=/);
   expect(html).not.toContain("user-scalable=no");expect(html).not.toContain("maximum-scale=1");
+});
+
+it("ships a script-free Persian installation guide with no invented store or APK URL", () => {
+  const html = readFileSync("public/screen-share-help.html", "utf8");
+  expect(html).toContain('lang="fa" dir="rtl"');
+  expect(html).toContain("com.garma.screenshare");
+  expect(html).not.toContain("play.google.com");
+  expect(html).not.toMatch(/<script\b|href=.*\.apk/i);
+  expect(readFileSync("public/sw.js", "utf8")).toContain('"/screen-share-help.html"');
 });

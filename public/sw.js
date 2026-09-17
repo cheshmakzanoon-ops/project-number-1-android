@@ -4,7 +4,7 @@
  */
 const CACHE = "garma-shell-dev";
 const PRECACHE_ASSETS = []; // build-injected
-const SHELL = ["/", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
+const SHELL = ["/", "/screen-share-help.html", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
   "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/icons/icon-maskable.png", ...PRECACHE_ASSETS];
 
 self.addEventListener("install", (event) => {
@@ -20,6 +20,16 @@ self.addEventListener("activate", (event) => {
   })());
 });
 
+async function appWindows() {
+  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  return clients.filter(client => {
+    try {
+      const url = new URL(client.url);
+      return url.origin === self.location.origin && ["/", "/index.html"].includes(url.pathname);
+    } catch { return false; }
+  });
+}
+
 self.addEventListener("push", (event) => {
   let data;
   try { data = event.data?.json(); } catch { return; }
@@ -27,7 +37,7 @@ self.addEventListener("push", (event) => {
   // Never ring for a push that spent minutes queued while the phone was offline.
   if (typeof data.timestamp === "number" && Date.now() - data.timestamp > 75_000) return;
   event.waitUntil((async () => {
-    const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const clients = await appWindows();
     if (clients.some((client) => client.visibilityState === "visible")) return;
     await self.registration.showNotification(data.title || "گرما", {
       body: data.body || "تماس ورودی", icon: "/icons/icon-192.png", badge: "/icons/icon-192.png",
@@ -46,7 +56,7 @@ self.addEventListener("notificationclick", (event) => {
   const callId = typeof event.notification.data?.callId === "string" ? event.notification.data.callId : "";
   const isAction = callId && (action === "accept" || action === "decline");
   event.waitUntil((async () => {
-    const list = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    const list = await appWindows();
     const usable = list.filter((c) => typeof c.focus === "function")
       .sort((a, b) => Number(b.focused) - Number(a.focused));
     // Deliver to exactly one tab. Broadcasting Accept made several clients
@@ -65,7 +75,7 @@ self.addEventListener("notificationclick", (event) => {
 
 self.addEventListener("pushsubscriptionchange", (event) => {
   // Authentication stays in the app, not in this worker or its cache.
-  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true })
+  event.waitUntil(appWindows()
     .then((clients) => { for (const client of clients) client.postMessage({ type: "push-subscription-changed" }); }));
 });
 
@@ -107,7 +117,7 @@ self.addEventListener("fetch", (event) => {
     try {
       const response = await networkWithDeadline(req);
       if (!response.ok && req.mode === "navigate") {
-        const shell = await match("/");
+        const shell = await match(cacheable ? url.pathname : "/");
         if (shell) return shell;
       }
       // The installed HTML must remain paired with the assets fetched during
@@ -118,10 +128,10 @@ self.addEventListener("fetch", (event) => {
       }
       return response;
     } catch {
-      const cached = await match(req.mode === "navigate" ? "/" : req);
+      const cached = await match(req.mode === "navigate" ? (cacheable ? url.pathname : "/") : req);
       if (cached) return cached;
       if (req.mode === "navigate") {
-        const shell = await match("/");
+        const shell = await match(cacheable ? url.pathname : "/");
         if (shell) return shell;
       }
       return new Response("آفلاین هستی؛ به اینترنت وصل شو و دوباره تلاش کن.", { status: 503,

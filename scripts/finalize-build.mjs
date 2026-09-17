@@ -17,7 +17,7 @@ export function finalizeBuild(directory = "dist") {
   const template = readFileSync(join(root, "sw.js"), "utf8");
   if (!template.includes('const PRECACHE_ASSETS = []; // build-injected')) throw new Error("Worker precache marker missing");
   if (!template.includes('const CACHE = "garma-shell-dev";')) throw new Error("Worker version marker missing");
-  const staticAssets = ["/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
+  const staticAssets = ["/screen-share-help.html", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
     "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/icons/icon-maskable.png"];
   const hash = createHash("sha256").update(template).update(readFileSync(join(root, "index.html")));
   for (const asset of [...staticAssets, ...assets]) hash.update(asset).update(readFileSync(join(root, asset.slice(1))));

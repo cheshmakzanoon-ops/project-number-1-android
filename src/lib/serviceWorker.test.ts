@@ -8,7 +8,7 @@ function worker(clients: object[] = []) {
   const listeners: Record<string,(event: any)=>void> = {};
   const self={ addEventListener:(name:string,fn:(event:any)=>void)=>{listeners[name]=fn;},
     location:{origin:"https://garma.test"}, skipWaiting:vi.fn(),
-    clients:{matchAll:vi.fn().mockResolvedValue(clients),claim:vi.fn(),openWindow:vi.fn()},
+    clients:{matchAll:vi.fn().mockResolvedValue(clients.map(client => ({url:"https://garma.test/", ...client}))),claim:vi.fn(),openWindow:vi.fn()},
     registration:{showNotification:vi.fn().mockResolvedValue(undefined)} };
   const caches={keys:vi.fn().mockResolvedValue(["unrelated-cache","garma-shell-v5","garma-shell-v6","garma-shell-dev"]),delete:vi.fn(),match:vi.fn(),open:vi.fn()};
   caches.open.mockResolvedValue({ match:caches.match, put:vi.fn(), addAll:vi.fn() });
@@ -128,4 +128,29 @@ it("ignores query-string assets and unrelated cache namespaces", async () => {
   const [response] = await fire("fetch", { request: { method: "GET", url: "https://garma.test/assets/old-release-Bf2s0x.js", mode: "cors" } });
   expect((response as Response).status).toBe(503);
   expect(caches.open).not.toHaveBeenCalledWith("unrelated-cache");
+});
+
+it("a visible installation guide does not suppress a genuine incoming-call notification", async () => {
+  const { fire, self } = worker([{ url: "https://garma.test/screen-share-help.html", visibilityState: "visible" }]);
+  await fire("push", { data: { json: () => ({ type: "incoming_call", callId: "call-help", timestamp: Date.now() }) } });
+  expect(self.registration.showNotification).toHaveBeenCalledOnce();
+});
+it("routes notification actions to the app instead of a focused help window", async () => {
+  const help = { url: "https://garma.test/screen-share-help.html", focused: true, focus: vi.fn(), postMessage: vi.fn() };
+  const app = { focus: vi.fn(), postMessage: vi.fn() };
+  const { fire } = worker([help, app]);
+  await fire("notificationclick", { action: "accept", notification: { data: { callId: "call-help" }, close: vi.fn() } });
+  expect(help.postMessage).not.toHaveBeenCalled();
+  expect(app.postMessage).toHaveBeenCalledWith({ type: "call-action", callId: "call-help", action: "accept" });
+});
+it("cold-launches the messenger when only the help window remains", async () => {
+  const { fire, self } = worker([{ url: "https://garma.test/screen-share-help.html", focus: vi.fn(), postMessage: vi.fn() }]);
+  await fire("notificationclick", { action: "decline", notification: { data: { callId: "call-help" }, close: vi.fn() } });
+  expect(self.clients.openWindow).toHaveBeenCalledWith("https://garma.test/?call=call-help&callAction=decline");
+});
+it("serves the bundled guide itself during an offline navigation", async () => {
+  const { fire, caches } = worker();
+  caches.match.mockImplementation(async (key: unknown) => new Response(key === "/screen-share-help.html" ? "installation guide" : "app shell"));
+  const [response] = await fire("fetch", { request: { method: "GET", url: "https://garma.test/screen-share-help.html", mode: "navigate" } });
+  expect(await (response as Response).text()).toBe("installation guide");
 });

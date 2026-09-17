@@ -26,8 +26,8 @@ export type ScreenSharePath = "web" | "android-native" | "unsupported";
 export const ANDROID_COMPANION_PACKAGE = "com.garma.screenshare";
 export const ANDROID_COMPANION_SCHEME = "garma-screenshare";
 
-/** Where the companion can be installed from (opened in Chrome itself). */
-export const ANDROID_COMPANION_INSTALL_URL = `https://play.google.com/store/apps/details?id=${ANDROID_COMPANION_PACKAGE}`;
+/** Bundled family installation guide; never imply an unpublished store listing exists. */
+export const ANDROID_COMPANION_INSTALL_URL = "/screen-share-help.html";
 
 /** Remembers that this device's web display capture does not really work. */
 const WEB_BROKEN_KEY = "garma.share.webBroken";
