@@ -43,6 +43,7 @@ export function InstallBanner() {
             </p>
           </>
         )}
+        {install.error && <p role="alert" className="mt-1 text-xs leading-5 text-rose-200">{install.error}</p>}
       </div>
 
       {!install.isIOS && install.canPromptNative && (

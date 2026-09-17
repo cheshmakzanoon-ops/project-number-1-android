@@ -1,6 +1,6 @@
 import { useConvex } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Check,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { fa } from "../lib/format";
+import { withTimeout } from "../lib/callLifecycle";
 import type { DirectoryEntry } from "../lib/types";
 
 export function ContactSheet({
@@ -42,9 +43,14 @@ export function ContactSheet({
   const [copying, setCopying] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const client = useConvex();
-  const mounted = useRef(false);
-  const copyInFlight = useRef(false);
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const owner = useMemo(() => ({ alive: open }), [token, open]);
+  const copyInFlight = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    owner.alive = open;
+    copyInFlight.current = null;
+    setCopied(false); setCopying(false); setCopyError(null);
+    return () => { owner.alive = false; };
+  }, [owner, open]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 2200);
@@ -73,6 +79,7 @@ export function ContactSheet({
   };
 
   const close = () => {
+    owner.alive = false;
     setSelected(new Set());
     onClose();
   };
@@ -86,18 +93,23 @@ export function ContactSheet({
   };
 
   const copyInvite = async () => {
-    if (copyInFlight.current) return;
-    copyInFlight.current = true;
-    setCopying(true);
-    setCopyError(null);
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (!owner.alive || copyInFlight.current) return;
+    const operation = {};
+    copyInFlight.current = operation;
+    setCopying(true); setCopyError(null); setCopied(false);
     try {
-      const code = await Promise.race([client.query(api.users.familyInvite, { token }),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timeout")), 12000); })]);
+      const code = await withTimeout(client.query(api.users.familyInvite, { token }), 12_000, "invite_timeout");
+      if (!owner.alive) return;
       if (!/^[A-Za-z0-9_-]{32,128}$/.test(code)) throw new Error("invalid_invite");
       const url = window.location.origin + "/#invite=" + encodeURIComponent(code);
       let didCopy = false;
-      try { await navigator.clipboard.writeText(url); didCopy = true; } catch { /* fallback below */ }
+      try {
+        await withTimeout(navigator.clipboard.writeText(url), 12_000, "clipboard_timeout");
+        didCopy = true;
+      } catch { /* Older browsers may still support the explicit-copy fallback. */ }
+      // Native clipboard work cannot be cancelled, but obsolete callbacks must
+      // never start a fallback write or update a different identity's UI.
+      if (!owner.alive) return;
       if (!didCopy) {
         const ta = document.createElement("textarea");
         try {
@@ -111,13 +123,12 @@ export function ContactSheet({
         } finally { ta.remove(); }
       }
       if (!didCopy) throw new Error("clipboard_failed");
-      if (mounted.current) setCopied(true);
+      setCopied(true);
     } catch {
-      if (mounted.current) setCopyError("پیوند کپی نشد؛ اتصال و اجازهٔ کلیپ‌بورد را بررسی کن و دوباره تلاش کن.");
+      if (owner.alive) setCopyError("پیوند کپی نشد؛ اتصال و اجازهٔ کلیپ‌بورد را بررسی کن و دوباره تلاش کن.");
     } finally {
-      clearTimeout(timer);
-      copyInFlight.current = false;
-      if (mounted.current) setCopying(false);
+      if (copyInFlight.current === operation) copyInFlight.current = null;
+      if (owner.alive) setCopying(false);
     }
   };
 
