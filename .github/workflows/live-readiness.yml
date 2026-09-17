@@ -1,0 +1,77 @@
+name: Check deployed backend
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/live-readiness.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check canonical deployment without modifying user data
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+          const source = readFileSync('src/main.tsx', 'utf8');
+          const url = source.match(/const CONVEX_URL = "(https:\/\/[^"\s]+)";/)?.[1];
+          if (!url) throw new Error('Canonical backend URL missing');
+          const results = [];
+          async function check(name, type, path, args, verdict) {
+            try {
+              const response = await fetch(`${url}/api/${type}`, {
+                method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path, args, format: 'json' }),
+              });
+              const data = await response.json();
+              const result = verdict(data);
+              results.push({ name, httpStatus: response.status, ...result });
+            } catch (error) {
+              results.push({ name, passed: false, reason: error?.name === 'TimeoutError' ? 'request_timeout' : 'backend_unreachable_or_invalid_response' });
+            }
+          }
+          const token = 'garma-readiness-unregistered-session-no-user-data';
+          await check('Unknown session is not authenticated', 'query', 'users:me', { token },
+            d => ({ passed: d.status === 'success' && d.value === null, reason: d.status === 'success' ? 'response_checked' : 'backend_function_error' }));
+          await check('Unknown session cannot read the directory', 'query', 'users:directory', { token },
+            d => ({ passed: d.status === 'success' && Array.isArray(d.value) && d.value.length === 0, reason: d.status === 'success' ? 'response_checked_without_logging_user_data' : 'backend_function_error' }));
+          await check('Push public key is configured (not a delivery test)', 'action', 'push:vapidPublicKey', {}, d => {
+            const key = typeof d.value === 'string' ? Buffer.from(d.value, 'base64url') : null;
+            return { passed: d.status === 'success' && key?.length === 65 && key[0] === 4, reason: 'public_key_presence_only' };
+          });
+          // This deliberately malformed code is rejected before any database
+          // mutation or token mint. Config is read first in this action.
+          await check('LiveKit config is present and malformed handoffs are rejected', 'action', 'livekit:redeemScreenShareHandoff', { code: 'invalid' }, d => ({
+            passed: d.status === 'error' && /handoff_invalid/.test(d.errorMessage ?? ''),
+            reason: /livekit_not_configured/.test(d.errorMessage ?? '') ? 'livekit_not_configured' : /handoff_invalid/.test(d.errorMessage ?? '') ? 'malformed_code_rejected' : 'unverified_backend_action',
+          }));
+          const report = { checkedAt: new Date().toISOString(), commit: process.env.GITHUB_SHA, backend: url,
+            deployCredentialAvailable: Boolean(process.env.CONVEX_DEPLOY_KEY),
+            scope: 'Read-only backend checks; no account creation, messages, call requests, real-media or notification delivery tests.', results };
+          writeFileSync('backend-readiness.json', JSON.stringify(report, null, 2));
+          console.log(JSON.stringify(report, null, 2));
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, '\n## Backend readiness\n' + results.map(r => `- ${r.passed ? 'PASS' : 'FAIL'}: ${r.name} (${r.reason})`).join('\n') + '\n');
+          if (results.some(r => !r.passed)) process.exitCode = 1;
+          JS
+      - name: Preserve sanitized readiness report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-readiness-${{ github.sha }}
+          path: backend-readiness.json
+          retention-days: 7
+          if-no-files-found: error
