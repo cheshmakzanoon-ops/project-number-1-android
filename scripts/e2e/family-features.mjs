@@ -19,7 +19,7 @@ export async function messagingFeatures({child,dad,context,register,send,check,u
   // These accounts and data belong only to the disposable messaging backend.
   await check('Search results open the actual matching message',async()=>{
     await lobby(child);
-    await child.getByText('CI queued offline',{exact:true}).click();
+    await child.getByText('CI Dad',{exact:true}).click();
     await child.getByRole('button',{name:'جستجو در گفتگو',exact:true}).click();
     await child.getByPlaceholder('جستجو در گفتگو…').fill('CI hello from dad');
     await child.getByRole('button').filter({hasText:'CI hello from dad'}).click();
@@ -44,7 +44,7 @@ export async function messagingFeatures({child,dad,context,register,send,check,u
     await lobby(dad);
     await group(child,['CI Dad','CI Third']);await send(child,'CI group message');
     for(const page of [dad,third]) {
-      await page.getByText('CI group message',{exact:true}).click();
+      await page.getByText('CI group message',{exact:false}).click();
       await page.getByRole('button',{name:'تماس صوتی گروهی',exact:true}).waitFor();
       await page.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI group message$/}).waitFor();
     }
