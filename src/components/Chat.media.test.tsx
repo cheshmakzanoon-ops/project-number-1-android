@@ -129,3 +129,15 @@ it("an uncertain image send retries its original caption without discarding a ne
   expect((screen.getByPlaceholderText("پیام خود را بنویسید…") as HTMLTextAreaElement).value).toBe("Additional text");
   expect(mock.put).toHaveBeenCalledOnce();
 });
+
+it("offers an audio-only call directly from a DM and hands off recording first", async () => {
+  const order:string[]=[]; mock.stop.mockImplementation(()=>{order.push("stop");return Promise.resolve(recording());});
+  const view=render(<Chat {...props} onCallAudio={()=>order.push("audio")} />);
+  fireEvent.click(screen.getByRole("button",{name:"ضبط پیام صوتی"}));
+  await act(async()=>{fireEvent.click(screen.getByRole("button",{name:"تماس صوتی"}));});
+  expect(order).toEqual(["stop","audio"]);expect(mock.send).not.toHaveBeenCalled();
+  view.rerender(<Chat {...props} callActive onCallAudio={()=>order.push("wrong")} />);
+  fireEvent.click(screen.getByRole("button",{name:"تماس صوتی"}));
+  expect(order).toEqual(["stop","audio"]);
+  expect((screen.getByRole("button",{name:"تماس تصویری"}) as HTMLButtonElement).disabled).toBe(true);
+});

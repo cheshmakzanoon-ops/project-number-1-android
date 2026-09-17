@@ -56,3 +56,15 @@ it("view receipts are idempotent rather than changing on every reactive delivery
 
 beforeEach(() => vi.stubEnv("GARMA_FAMILY_INVITE_CODE", "test-family-invite-code-for-automated-tests"));
 afterEach(() => vi.unstubAllEnvs());
+it("refuses unauthenticated status deletion instead of acknowledging a false success",async()=>{
+  const {t,first}=await setup();
+  await expect(t.mutation(api.statuses.remove,{token:"unregistered",statusId:first})).rejects.toThrow("unauthorized");
+  expect(await t.run(ctx=>ctx.db.get(first))).not.toBeNull();
+});
+it("refuses deleting another person's status and remains idempotent for the owner",async()=>{
+  const {t,first}=await setup();
+  await expect(t.mutation(api.statuses.remove,{token:"b".repeat(64),statusId:first})).rejects.toThrow("forbidden");
+  expect(await t.run(ctx=>ctx.db.get(first))).not.toBeNull();
+  await t.mutation(api.statuses.remove,{token:"a".repeat(64),statusId:first});
+  await expect(t.mutation(api.statuses.remove,{token:"a".repeat(64),statusId:first})).resolves.toBeNull();
+});

@@ -642,35 +642,24 @@ export function Chat({
             {muted ? <BellOff size={18} /> : <Bell size={18} />}
           </HeaderBtn>
         )}
-        {isGroup ? (
-          <>
-            <button
-              onClick={() => beginCall("audio")}
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sage-600 text-white shadow-md shadow-black/30 transition hover:bg-sage-500 active:scale-95"
-              aria-label="تماس صوتی گروهی"
-              title="تماس صوتی گروهی"
-            >
-              <Phone size={17} />
-            </button>
-            <button
-              onClick={() => beginCall("video")}
-              className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-md shadow-black/30 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
-              aria-label="تماس تصویری گروهی"
-              title="تماس تصویری گروهی"
-            >
-              <Video size={17} />
-            </button>
-          </>
-        ) : (
-          <button
-            onClick={() => beginCall("video")}
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-md shadow-black/30 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
-            aria-label="تماس تصویری"
-            title="تماس تصویری"
-          >
-            <Video size={17} />
-          </button>
-        )}
+        <button
+          onClick={() => beginCall("audio")}
+          disabled={callActive}
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sage-600 text-white shadow-md shadow-black/30 transition hover:bg-sage-500 active:scale-95 disabled:opacity-40"
+          aria-label={isGroup ? "تماس صوتی گروهی" : "تماس صوتی"}
+          title={isGroup ? "تماس صوتی گروهی" : "تماس صوتی"}
+        >
+          <Phone size={17} />
+        </button>
+        <button
+          onClick={() => beginCall("video")}
+          disabled={callActive}
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-md shadow-black/30 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95 disabled:opacity-40"
+          aria-label={isGroup ? "تماس تصویری گروهی" : "تماس تصویری"}
+          title={isGroup ? "تماس تصویری گروهی" : "تماس تصویری"}
+        >
+          <Video size={17} />
+        </button>
       </div>
 
       {/* ================= messages ================= */}

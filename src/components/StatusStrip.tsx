@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "../lib/softQuery";
@@ -6,6 +6,7 @@ import { Camera, Eye, Pencil, Plus, Send, Trash2, X } from "lucide-react";
 import { Avatar } from "./Avatar";
 import { clock, fa, relative } from "../lib/format";
 import { compressImage, putStorageFile } from "../lib/media";
+import { withTimeout } from "../lib/callLifecycle";
 import type { Id } from "../convex/_generated/dataModel";
 
 /** One projected status row (mirrors statuses.statusView server-side). */
@@ -70,6 +71,17 @@ export function StatusStrip({
     return (attemptRef.current = { id: crypto.randomUUID(), body, photo: blob });
   }
 
+  // Every continuation belongs to the identity that started it. A late image
+  // or upload may finish after leaving this tab; it must never publish a status.
+  const owner = useMemo(() => ({ alive: true, sequence: 0 }), [token, meId]);
+  useLayoutEffect(() => {
+    owner.alive = true;
+    postingRef.current = false;
+    attemptRef.current = null;
+    setPosting(false); setComposer(false); setPhoto(null); setText(""); setViewer(null); setErr(null);
+    return () => { owner.alive = false; owner.sequence++; };
+  }, [owner]);
+
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const refresh = () => setNow(Date.now());
@@ -101,48 +113,42 @@ export function StatusStrip({
     return () => window.clearTimeout(t);
   }, [err]);
 
-  const postText = useCallback(async () => {
+  const postStatus = useCallback(async () => {
     const body = text.trim();
-    if (!body || postingRef.current) return;
-    postingRef.current = true;
-    const attempt = attemptFor(body, null);
-    setPosting(true);
-    try {
-      await post({ token, kind: "text", body, clientPostId: attempt.id });
-      attemptRef.current = null;
-      setText("");
-      setComposer(false);
-    } catch {
-      setErr("ثبت وضعیت ممکن نشد — دوباره تلاش کن.");
-    } finally {
-      postingRef.current = false;
-      setPosting(false);
+    if (postingRef.current || !owner.alive || (!photo && !body)) return;
+    if (body.length > (photo ? 200 : 300)) {
+      setErr("توضیح عکس باید حداکثر ۲۰۰ حرف باشد.");
+      return;
     }
-  }, [post, text, token]);
-
-  const postPhoto = useCallback(async () => {
-    if (!photo || postingRef.current) return;
     postingRef.current = true;
-    const attempt = attemptFor(text.trim(), photo.blob);
-    setPosting(true);
+    const operation = ++owner.sequence;
+    const current = () => owner.alive && owner.sequence === operation;
+    const attempt = attemptFor(body, photo?.blob ?? null);
+    setPosting(true); setErr(null);
     try {
-      if (!attempt.storageId) {
-        const blob = await compressImage(photo.blob);
-        const up = await uploadUrl({ token });
-        attempt.storageId = (await putStorageFile(up, blob, token)) as Id<"_storage">;
+      if (photo && !attempt.storageId) {
+        const blob = await withTimeout(compressImage(photo.blob), 20_000, "status_image_timeout");
+        if (!current()) return;
+        const up = await withTimeout(uploadUrl({ token }), 15_000, "status_upload_authorization_timeout");
+        if (!current()) return;
+        const storageId = await putStorageFile(up, blob, token);
+        if (!current()) return;
+        attempt.storageId = storageId as Id<"_storage">;
       }
-      await post({ token, kind: "image", storageId: attempt.storageId, mimeType: "image/jpeg", body: attempt.body, clientPostId: attempt.id });
+      if (!current()) return;
+      await withTimeout(post({ token, kind: photo ? "image" : "text", body: attempt.body,
+        clientPostId: attempt.id,
+        ...(photo ? { storageId: attempt.storageId, mimeType: "image/jpeg" } : {}),
+      }), 15_000, "status_post_timeout");
+      if (!current()) return;
       attemptRef.current = null;
-      setPhoto(null);
-      setText("");
-      setComposer(false);
+      setPhoto(null); setText(""); setComposer(false);
     } catch {
-      setErr("ثبت عکس وضعیت ممکن نشد — دوباره تلاش کن.");
+      if (current()) setErr("ثبت وضعیت تأیید نشد؛ متن و عکس نگه داشته شد. دوباره تلاش کن.");
     } finally {
-      postingRef.current = false;
-      setPosting(false);
+      if (current()) { postingRef.current = false; setPosting(false); }
     }
-  }, [photo, post, text, token, uploadUrl]);
+  }, [photo, post, text, token, uploadUrl, owner]);
 
   const mineAll = (mine ?? []).filter(s => s.expiresAt > now);
   const hasMine = mineAll.length > 0;
@@ -240,25 +246,25 @@ export function StatusStrip({
             <span className="h-10 w-10" />
           </div>
           <div className="flex flex-1 flex-col items-center justify-center px-6">
-            {photo ? (
+            {photo && (
               <img
                 src={photo.url}
                 alt=""
                 className="max-h-[55vh] w-auto rounded-3xl border border-white/10 object-contain shadow-2xl"
               />
-            ) : (
+            )}
               <textarea
                 disabled={posting}
                 autoFocus
                 value={text}
                 onChange={(e) => setText(e.target.value)}
-                maxLength={300}
-                rows={4}
-                placeholder="حال و روزت را بنویس…"
+                maxLength={photo ? 200 : 300}
+                rows={photo ? 2 : 4}
+                placeholder={photo ? "توضیح عکس (اختیاری)…" : "حال و روزت را بنویس…"}
                 className="w-full max-w-sm resize-none rounded-3xl border border-ember-300/25 bg-dusk-100 px-5 py-4 text-lg font-bold text-dusk-950 caret-ember-300 outline-none placeholder:text-dusk-600 focus:border-ember-400/60"
               />
-            )}
-            <p className="mt-2 text-[11px] text-white/40">{fa(300 - text.length)}</p>
+            <p className="mt-2 text-[11px] text-white/40">{fa((photo ? 200 : 300) - text.length)}</p>
+            {photo && text.length > 200 && <p role="alert" className="mt-2 text-sm text-rose-200">توضیح عکس باید حداکثر ۲۰۰ حرف باشد.</p>}
           </div>
           {err && <p role="alert" className="mx-6 mb-3 rounded-xl bg-rose-500/20 px-4 py-3 text-sm text-white">{err}</p>}
           <div className="safe-area mx-auto flex w-full max-w-md items-center justify-between px-6 pb-5">
@@ -273,10 +279,10 @@ export function StatusStrip({
             </button>
             <button
               type="button"
-              onClick={() => void (photo ? postPhoto() : postText())}
-              disabled={posting || (!text.trim() && !photo)}
+              onClick={() => void postStatus()}
+              disabled={posting || text.trim().length > (photo ? 200 : 300) || (!text.trim() && !photo)}
               className={`flex items-center gap-2 rounded-full px-7 py-3.5 font-extrabold shadow-lg transition active:scale-95 ${
-                posting || (!text.trim() && !photo)
+                posting || text.trim().length > (photo ? 200 : 300) || (!text.trim() && !photo)
                   ? "cursor-not-allowed bg-dusk-300/50 text-dusk-500"
                   : "bg-ember-400 text-cocoa shadow-black/40 hover:bg-ember-300"
               }`}
@@ -294,8 +300,9 @@ export function StatusStrip({
               const f = e.target.files?.[0];
               if (postingRef.current) return;
               attemptRef.current = null;
-              if (f) setPhoto({ blob: f, url: URL.createObjectURL(f) });
-              e.target.value = "";
+              try { if (f) setPhoto({ blob: f, url: URL.createObjectURL(f) }); }
+              catch { setErr("عکس باز نشد؛ دوباره انتخاب کن."); }
+              finally { e.target.value = ""; }
             }}
           />
         </div>
@@ -304,6 +311,7 @@ export function StatusStrip({
       {/* ================= story viewer ================= */}
       {viewer && (
         <StatusViewer
+          key={`${token}:${viewer.ownerId}`}
           token={token}
           ownerId={viewer.ownerId}
           mine={viewer.mine}
@@ -404,7 +412,7 @@ function StatusViewer({
   onDelete: (id: Id<"statuses">) => void | Promise<void>;
   onView: (id: Id<"statuses">) => void;
 }) {
-  const { data: rows } = useSoftQuery(
+  const { data: rows, unavailable } = useSoftQuery(
     api.statuses.forOwner,
     token ? { token, ownerId } : "skip",
   ) as unknown as { data: StatusRow[] | undefined; unavailable: boolean };
@@ -414,9 +422,19 @@ function StatusViewer({
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleting = useRef(false);
+  const mounted = useRef(false);
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+  useEffect(() => {
+    const changed = () => setVisible(document.visibilityState !== "hidden");
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
   const list = rows ?? [];
   const current = list[Math.min(idx, Math.max(0, list.length - 1))];
+
+  useEffect(() => { setProgress(0); setDeleteError(null); setShowViewers(false); }, [current?._id]);
 
   const advance = useCallback(() => {
     setProgress(0);
@@ -426,7 +444,7 @@ function StatusViewer({
 
   // 6 seconds per status, auto-advance.
   useEffect(() => {
-    if (!current || deletePending || deleteError || showViewers) return;
+    if (!current || !visible || deletePending || deleteError || showViewers) return;
     const id = window.setInterval(() => {
       setProgress((p) => {
         if (p >= 100) return p;
@@ -434,11 +452,11 @@ function StatusViewer({
       });
     }, 120);
     return () => window.clearInterval(id);
-  }, [current?._id, deletePending, deleteError, showViewers]);
+  }, [current?._id, visible, deletePending, deleteError, showViewers]);
 
   useEffect(() => {
-    if (progress >= 100 && !deletePending && !deleteError && !showViewers) advance();
-  }, [progress, advance, deletePending, deleteError, showViewers]);
+    if (visible && progress >= 100 && !deletePending && !deleteError && !showViewers) advance();
+  }, [progress, visible, advance, deletePending, deleteError, showViewers]);
 
   // Mark as seen — once per status id. `current` is a fresh object on every
   // reactive delivery (our own view() write changes the row's viewers array,
@@ -448,12 +466,12 @@ function StatusViewer({
   // marked instead and bail out of the loop.
   const seenRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!current || mine) return;
+    if (!current || mine || !visible) return;
     const id = String(current._id);
     if (seenRef.current.has(id)) return;
     seenRef.current.add(id);
     onView(current._id);
-  }, [current, mine, onView]);
+  }, [current, mine, visible, onView]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -469,7 +487,7 @@ function StatusViewer({
         <button onClick={onClose} aria-label="بستن" className="absolute top-4 end-4 grid h-10 w-10 place-items-center rounded-full bg-white/10 text-white">
           <X size={20} />
         </button>
-        <p className="text-sm text-white/60">این وضعیت تمام شده است.</p>
+        <p className="text-sm text-white/60">{unavailable ? "دریافت وضعیت ممکن نشد؛ اتصال را بررسی کن." : rows === undefined ? "در حال دریافت وضعیت…" : "این وضعیت تمام شده است."}</p>
       </div>
     );
   }
@@ -502,9 +520,11 @@ function StatusViewer({
               deleting.current = true;
               setDeletePending(true);
               setDeleteError(null);
-              try { await onDelete(current._id); onClose(); }
-              catch { setDeleteError("حذف انجام نشد؛ وضعیت هنوز باقی است. دوباره تلاش کن."); }
-              finally { deleting.current = false; setDeletePending(false); }
+              try {
+                await withTimeout(Promise.resolve(onDelete(current._id)), 15_000, "status_delete_timeout");
+                if (mounted.current) onClose();
+              } catch { if (mounted.current) setDeleteError("حذف تأیید نشد؛ اتصال را بررسی کن و دوباره تلاش کن."); }
+              finally { if (mounted.current) { deleting.current = false; setDeletePending(false); } }
             }}
             aria-label="حذف وضعیت"
             className="grid h-9 w-9 place-items-center rounded-full bg-white/10 text-rose-300 transition hover:bg-white/20"
@@ -530,11 +550,13 @@ function StatusViewer({
             setProgress(0);
             setIdx((i) => Math.max(0, i - 1));
           }}
+          disabled={deletePending}
           aria-label="قبلی"
         />
         <button
           className="absolute inset-y-0 end-0 z-10 w-2/3"
           onClick={advance}
+          disabled={deletePending}
           aria-label="بعدی"
         />
         <div className="grid h-full place-items-center px-6">

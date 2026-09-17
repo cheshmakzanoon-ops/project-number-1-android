@@ -153,9 +153,10 @@ export const remove = mutation({
   args: { token: v.string(), statusId: v.id("statuses") },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
-    if (!me) return;
+    if (!me) throw new Error("unauthorized");
     const row = await ctx.db.get(args.statusId);
-    if (!row || row.userId !== me) return;
+    if (!row) return;
+    if (row.userId !== me) throw new Error("forbidden");
     await ctx.db.delete(args.statusId);
     await deleteUnreferencedStorage(ctx, row.storageId);
   },
