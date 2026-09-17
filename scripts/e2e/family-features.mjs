@@ -24,7 +24,10 @@ export async function messagingFeatures({child,dad,context,register,send,check,u
     await child.getByPlaceholder('جستجو در گفتگو…').fill('CI hello from dad');
     await child.getByRole('button').filter({hasText:'CI hello from dad'}).click();
     await child.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI hello from dad$/}).waitFor();
-    await child.getByRole('button',{name:/نمایش اطراف پیام/}).click();
+    // A recent hit stays in the loaded window; no 'back to latest' control is needed.
+    await child.getByPlaceholder('جستجو در گفتگو…').waitFor({state:'hidden'});
+    assert.equal(await child.getByRole('button',{name:/نمایش اطراف پیام/}).count(),0);
+    await until(()=>child.locator('[data-mid].animate-flash').count(),'matching message highlighted');
   });
   await check('Conversation mute state can be enabled and disabled',async()=>{
     await child.getByRole('button',{name:'بی‌صدا کردن',exact:true}).click();
@@ -38,6 +41,26 @@ export async function messagingFeatures({child,dad,context,register,send,check,u
     await dialog.getByRole('button',{name:'بستن',exact:true}).click();
     await dialog.waitFor({state:'hidden'});
     assert.equal(await dad.getByRole('button',{name:'ویرایش',exact:true}).count(),0);
+  });
+  await check('Older search hits open their surrounding window and return to recent messages',async()=>{
+    // Use normal message APIs through the UI, below each member's rate budget.
+    // 102 newer messages move the original hit out of the 100-message live window.
+    for(let index=0;index<102;index++) {
+      const sender=index%2===0?child:dad, receiver=index%2===0?dad:child;
+      const body=`CI history filler ${index}`;
+      await send(sender,body);
+      await receiver.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:new RegExp(`^${body}$`)}).waitFor();
+    }
+    assert.equal(await child.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI hello from dad$/}).count(),0);
+    await child.getByRole('button',{name:'جستجو در گفتگو',exact:true}).click();
+    await child.getByPlaceholder('جستجو در گفتگو…').fill('CI hello from dad');
+    await child.getByRole('button').filter({hasText:'CI hello from dad'}).click();
+    const hit=child.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI hello from dad$/});
+    await hit.waitFor();
+    await until(()=>hit.evaluate(element=>{const r=element.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight;}),'older message scrolled into view');
+    await child.getByRole('button',{name:/نمایش اطراف پیام/}).click();
+    await child.getByRole('button',{name:/نمایش اطراف پیام/}).waitFor({state:'hidden'});
+    await child.getByText('CI history filler 101',{exact:true}).waitFor();
   });
   const third=await context();await register(third,'CI Third');
   await check('A three-person group distributes messages to both other members',async()=>{
