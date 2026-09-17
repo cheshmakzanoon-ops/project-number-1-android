@@ -20,6 +20,7 @@ const h = vi.hoisted(() => {
   /** Test knobs — flipped per test to bend the fake SDK's behavior. */
   const control = {
     calls: [] as Array<Record<string, unknown>>,
+    audioHang: false,
     micMode: "ok" as "ok" | "hang" | "defer",
     camMode: "ok" as "ok" | "hang",
     shareMode: "ok" as "ok" | "fail" | "defer",
@@ -261,7 +262,7 @@ const h = vi.hoisted(() => {
       }
       this.state = "connected";
     }
-    async startAudio() {}
+    async startAudio() { if (control.audioHang) await new Promise(() => {}); }
     disconnect() {
       this.state = "disconnected";
     }
@@ -324,6 +325,7 @@ const h = vi.hoisted(() => {
     pushNotify: { name: "push.notifyIncomingCall" },
   };
   const fns = {
+    load: vi.fn(async () => lk),
     start: vi.fn(async () => "call-1"),
     end: vi.fn(async () => ({})),
     answer: vi.fn(async () => ({})),
@@ -361,7 +363,7 @@ vi.mock("../convex/_generated/api", () => ({
 }));
 
 vi.mock("./livekitLoader", () => ({
-  loadLiveKit: async () => h.lk,
+  loadLiveKit: () => h.fns.load(),
   livekit: () => h.lk,
 }));
 
@@ -460,6 +462,8 @@ const flush = async (ms = 0) => {
 beforeEach(() => {
   h.FakeRoom.instances.length = 0;
   h.control.calls = [];
+  h.control.audioHang = false;
+  h.fns.load.mockReset().mockResolvedValue(h.lk);
   h.control.micMode = "ok";
   h.control.camMode = "ok";
   h.control.shareMode = "ok";
@@ -479,6 +483,8 @@ beforeEach(() => {
     { deviceId: "cam-back", kind: "videoinput" },
   ];
   // Shrunken deadlines: the SAME production code paths, fast.
+  CALL_OP_TIMEOUTS.sdkLoad = 60;
+  CALL_OP_TIMEOUTS.audioPlayback = 40;
   CALL_OP_TIMEOUTS.mic = 60;
   CALL_OP_TIMEOUTS.micRetryDelay = 10;
   CALL_OP_TIMEOUTS.camera = 80;
@@ -1066,6 +1072,50 @@ describe("lock ownership across lifecycles", () => {
     // it: the obsolete flip must have released it.
     expect(camTrack?.mediaStreamTrack.stopped).toBe(true);
     expect(ctx.result.current.session).toBeNull();
+    ctx.unmount();
+  });
+});
+
+
+describe("SDK loading and playback deadlines", () => {
+  it("a failed lazy SDK download is retryable, not an uncaught rejection", async () => {
+    h.fns.load.mockRejectedValue(new TypeError("Failed to fetch dynamically imported module"));
+    const ctx = await mount([callRow({kind: "audio"})], {waitRoom: false});
+    await flush(25);
+    expect(h.FakeRoom.instances).toHaveLength(0);
+    expect(ctx.result.current.reconnecting).toBe(true);
+    h.fns.load.mockResolvedValue(h.lk);
+    await waitFor(() => expect(h.FakeRoom.instances.length).toBeGreaterThan(0), {timeout: 3000});
+    await waitFor(() => expect(ctx.result.current.reconnecting).toBe(false));
+    ctx.unmount();
+  });
+  it("a hanging playback unlock cannot prevent publishing the microphone", async () => {
+    h.control.audioHang = true;
+    const ctx = await mount([callRow({kind: "audio"})]);
+    await waitFor(() => expect(h.control.micCalls).toBeGreaterThan(0));
+    await waitFor(() => expect(ctx.result.current.reconnecting).toBe(false));
+    expect(ctx.result.current.micOn).toBe(true);
+    ctx.unmount();
+  });
+  it("a late SDK completion after hangup cannot query credentials or create a room", async () => {
+    let resolve!: (value: typeof h.lk) => void;
+    h.fns.load.mockReturnValue(new Promise(r => { resolve = r; }));
+    const ctx = await mount([callRow()], {waitRoom: false});
+    await act(async () => { await ctx.result.current.hangup(); resolve(h.lk); });
+    await flush(30);
+    expect(ctx.result.current.session).toBeNull();
+    expect(h.FakeRoom.instances).toHaveLength(0);
+    expect(h.fns.getToken).not.toHaveBeenCalled();
+    ctx.unmount();
+  });
+  it("a stalled SDK fetch times out and can recover on the next connect attempt", async () => {
+    h.fns.load.mockReturnValue(new Promise(() => {}));
+    const ctx = await mount([callRow({kind:"audio"})], {waitRoom:false});
+    await flush(90);
+    expect(h.FakeRoom.instances).toHaveLength(0);
+    h.fns.load.mockResolvedValue(h.lk);
+    await waitFor(() => expect(h.FakeRoom.instances.length).toBeGreaterThan(0), {timeout:3000});
+    await waitFor(() => expect(ctx.result.current.reconnecting).toBe(false));
     ctx.unmount();
   });
 });

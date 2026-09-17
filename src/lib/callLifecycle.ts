@@ -63,6 +63,10 @@ export type OpKind =
  * quickly instead of mocking the ownership model away.
  */
 export const CALL_OP_TIMEOUTS = {
+  /** Lazy SDK fetch must never leave a call stuck before a room exists. */
+  sdkLoad: 15_000,
+  /** Playback unlocking is best effort and must not delay media publication. */
+  audioPlayback: 4_000,
   /** Initial microphone publication on a fresh room. */
   mic: 8_000,
   /** Bounded pause before the single automatic microphone retry. */

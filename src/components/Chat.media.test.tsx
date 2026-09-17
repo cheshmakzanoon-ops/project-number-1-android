@@ -74,3 +74,58 @@ it("failed message deletion is reported rather than becoming an unhandled reject
   expect(screen.getByText("پیام حذف نشد؛ دوباره تلاش کن.")).toBeTruthy();
   expect(screen.getByText("Delete this")).toBeTruthy();
 });
+
+it("cancelling an image preserves the user's text draft", async()=>{
+  const view=render(<Chat {...props} />);
+  fireEvent.change(screen.getByPlaceholderText("پیام خود را بنویسید…"),{target:{value:"Unsent family message"}});
+  await act(async()=>fireEvent.change(view.container.querySelector('input[type=file]')!,{target:{files:[new File(["image"],"photo.png",{type:"image/png"})]}}));
+  fireEvent.click(screen.getByRole("button",{name:"لغو عکس"}));
+  expect((screen.getByPlaceholderText("پیام خود را بنویسید…") as HTMLTextAreaElement).value).toBe("Unsent family message");
+});
+it("replacing a photo releases its old preview and unmount releases the current preview", async()=>{
+  let count=0;vi.mocked(URL.createObjectURL).mockImplementation(()=>`blob:photo-${++count}`);
+  const view=render(<Chat {...props} />);
+  const input=view.container.querySelector('input[type=file]')!;
+  await act(async()=>fireEvent.change(input,{target:{files:[new File(["one"],"one.png",{type:"image/png"})]}}));
+  await act(async()=>fireEvent.change(input,{target:{files:[new File(["two"],"two.png",{type:"image/png"})]}}));
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:photo-1");
+  view.unmount();expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:photo-2");
+});
+it("a slow older image decode cannot replace the most recent selection", async()=>{
+  let done!: (blob:Blob)=>void;mock.compress.mockReturnValueOnce(new Promise<Blob>(r=>done=r));
+  const view=render(<Chat {...props} />);const input=view.container.querySelector('input[type=file]')!;
+  const first=new File(["one"],"one.png",{type:"image/png"}),last=new File(["two"],"two.png",{type:"image/png"});
+  fireEvent.change(input,{target:{files:[first]}});
+  await act(async()=>fireEvent.change(input,{target:{files:[last]}}));
+  await act(async()=>done(first));
+  expect(URL.createObjectURL).toHaveBeenCalledExactlyOnceWith(last);
+});
+it("a photo decode finishing after unmount creates no orphan object URL",async()=>{
+  let done!: (blob:Blob)=>void;mock.compress.mockReturnValueOnce(new Promise<Blob>(r=>done=r));
+  const view=render(<Chat {...props} />);fireEvent.change(view.container.querySelector('input[type=file]')!,{target:{files:[new File(["one"],"one.png",{type:"image/png"})]}});
+  view.unmount();await act(async()=>done(new Blob(["one"])));
+  expect(URL.createObjectURL).not.toHaveBeenCalled();
+});
+it.each(["cancel","save"])("%s editing preserves the earlier unsent draft",async outcome=>{
+  mock.messages=[{_id:"message",senderId:"me",isMine:true,kind:"text",body:"Old message",createdAt:Date.now(),delivery:"sent",reactions:[]}];
+  render(<Chat {...props} />);
+  fireEvent.change(screen.getByPlaceholderText("پیام خود را بنویسید…"),{target:{value:"My unfinished draft"}});
+  fireEvent.click(screen.getByText("Old message"));fireEvent.click(screen.getByRole("button",{name:"ویرایش"}));
+  if(outcome==="cancel") fireEvent.click(screen.getByRole("button",{name:"لغو ویرایش"}));
+  else {fireEvent.change(screen.getByPlaceholderText("ویرایش متن…"),{target:{value:"Edited message"}});await act(async()=>fireEvent.click(screen.getByRole("button",{name:"ارسال"})));}
+  expect((screen.getByPlaceholderText("پیام خود را بنویسید…") as HTMLTextAreaElement).value).toBe("My unfinished draft");
+});
+it("an uncertain image send retries its original caption without discarding a newer draft",async()=>{
+  mock.send.mockReturnValueOnce(new Promise(()=>{}));
+  const view=render(<Chat {...props} />);
+  await act(async()=>fireEvent.change(view.container.querySelector('input[type=file]')!,{target:{files:[new File(["image"],"photo.png",{type:"image/png"})]}}));
+  fireEvent.change(screen.getByPlaceholderText("توضیح عکس (اختیاری)…"),{target:{value:"Original caption"}});
+  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"ارسال عکس"})));
+  await act(async()=>vi.advanceTimersByTimeAsync(15_000));
+  const original=mock.send.mock.calls[0][0];
+  fireEvent.change(screen.getByPlaceholderText("توضیح عکس (اختیاری)…"),{target:{value:"Additional text"}});
+  await act(async()=>fireEvent.click(screen.getByRole("button",{name:"ارسال عکس"})));
+  expect(mock.send.mock.calls[1][0]).toEqual(original);
+  expect((screen.getByPlaceholderText("پیام خود را بنویسید…") as HTMLTextAreaElement).value).toBe("Additional text");
+  expect(mock.put).toHaveBeenCalledOnce();
+});

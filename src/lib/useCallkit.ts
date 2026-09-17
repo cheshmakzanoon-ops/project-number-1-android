@@ -1438,12 +1438,13 @@ export function useCallkit(token: string | null): GarmaCallkit {
       if (priorConnectOp) cancelOp(priorConnectOp);
       const op = createOp(owner, "connect");
       opRefs.current.connect = op;
-      const LK = await loadLiveKit();
-      const { Room, RoomEvent, Track, ConnectionQuality, ConnectionState } = LK;
-      const liveRoom = roomRef.current;
-      if (liveRoom && liveRoom.state === ConnectionState.Connected) return true;
       let room: Room | null = null;
       try {
+        const LK = await withTimeout(loadLiveKit(), CALL_OP_TIMEOUTS.sdkLoad, "sdk_load_timeout");
+        if (owner.disposed || !opCurrent(op, opRefs.current.connect)) return "cancelled";
+        const { Room, RoomEvent, Track, ConnectionQuality, ConnectionState } = LK;
+        const liveRoom = roomRef.current;
+        if (liveRoom && liveRoom.state === ConnectionState.Connected) return true;
         const { url, token: jwt } = await withTimeout(
           getToken({ token, callId }),
           20_000,
@@ -1861,7 +1862,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
         callVideoDebug("roomConnected", { callId });
 
         try {
-          await r.startAudio();
+          await withTimeout(r.startAudio(), CALL_OP_TIMEOUTS.audioPlayback, "audio_playback_timeout");
         } catch {
           /* noop */
         }
@@ -1889,7 +1890,7 @@ export function useCallkit(token: string | null): GarmaCallkit {
           enableCam
             ? captureCameraAt(startTier, { enable: true })
             : kind === "video" && restore
-              ? r.localParticipant.setCameraEnabled(false).then(() => false)
+              ? withTimeout(r.localParticipant.setCameraEnabled(false), CALL_OP_TIMEOUTS.camera, "camera_disable_timeout").then(() => false)
               : Promise.resolve(false),
           enableMic ? startMicrophoneOwned(r, enableMic, owner) : Promise.resolve(true),
         ]);
@@ -1975,8 +1976,12 @@ export function useCallkit(token: string | null): GarmaCallkit {
         setError(null);
         return true;
       } catch (e) {
-        clearQualityWatch();
-        if (room && roomRef.current === room) roomRef.current = null;
+        // A failed obsolete load/connect owns neither the replacement room nor
+        // its quality sampler. Release only this attempt's resources.
+        if (room && roomRef.current === room) {
+          clearQualityWatch();
+          roomRef.current = null;
+        }
         safeDisconnect(room);
         // CANCELLED ≠ FAILED: a hangup (disposed owner) or a superseded
         // attempt (cancelled op) is intentional cancellation, not a transient

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { withTimeout } from "./lib/callLifecycle";
 import { useMutation } from "convex/react";
 import { Bell, BellRing, ExternalLink, X } from "lucide-react";
 import { api } from "./convex/_generated/api";
@@ -76,6 +77,18 @@ export function App() {
   const callkit = useCallkit(token);
   const push = usePush(me ? token : null);
   const { session } = callkit;
+  // Async UI intents have owners too: a late contact lookup must not open a
+  // previous chat or dial someone after the user selected another action.
+  const activity = useMemo(() => ({alive: false, authBusy: false, authGeneration: 0,
+    navigation: 0, userId: null as string | null, inCall: false}), []);
+  activity.userId = me?._id ?? null;
+  activity.inCall = !!session || !!callkit.busy;
+  useEffect(() => {
+    activity.alive = true;
+    return () => { activity.alive = false; activity.authGeneration++; activity.navigation++; activity.authBusy = false; };
+  }, [activity]);
+  const currentNavigation = useCallback((generation: number, userId: string | null) =>
+    activity.alive && activity.navigation === generation && !!userId && activity.userId === userId, [activity]);
 
   // ---- Incoming-call notification actions (پاسخ / رد) --------------------
   // When the phone rings while the app is closed or backgrounded, the OS
@@ -206,13 +219,18 @@ export function App() {
 
   const handleRegister = useCallback(
     async (name: string, inviteCode: string) => {
+      if (activity.authBusy) return;
+      activity.authBusy = true;
+      const generation = ++activity.authGeneration;
+      const current = () => activity.alive && generation === activity.authGeneration;
       setBusy(true);
       setAuthErr(null);
       try {
         if (!deviceTokenPersists()) throw new Error("storage_unavailable");
-        await register({ token, displayName: name, inviteCode });
-        clearFamilyInvite();
+        await withTimeout(register({ token, displayName: name, inviteCode }), 15_000, "register_timeout");
+        if (current()) clearFamilyInvite();
       } catch (error) {
+        if (!current()) return;
         const message = String(error);
         setAuthErr(/invite_required|invite_invalid/.test(message) ? "کد دعوت درست نیست؛ لینک دعوت خانواده را دوباره باز کن." :
           /registration_not_configured/.test(message) ? "ورود اعضای جدید هنوز توسط صاحب برنامه فعال نشده است." :
@@ -220,25 +238,30 @@ export function App() {
           /storage_unavailable/.test(message) ? "مرورگر نمی‌تواند ورودت را نگه دارد. حالت خصوصی را ببند و ذخیره‌سازی سایت را فعال کن." :
           "نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       } finally {
-        setBusy(false);
+        if (current()) { activity.authBusy = false; setBusy(false); }
       }
     },
-    [register, token],
+    [register, token, activity],
   );
 
   // ---- Opening conversations ---------------------------------------------
 
   const openConv = useCallback(
     (cid: Id<"conversations">, kind: "dm" | "group", name: string, color: string, peers: ConvPeer[]) => {
+      activity.navigation++;
+      setActionError(null);
       setActive({ cid, kind, name, color, peers });
     },
-    [],
+    [activity],
   );
 
   const openChatWith = useCallback(
     async (c: DirectoryEntry) => {
+      const generation = ++activity.navigation, userId = activity.userId;
+      setActionError(null);
       try {
-        const cid = await startDM({ token, otherId: c._id });
+        const cid = await withTimeout(startDM({ token, otherId: c._id }), 15_000, "conversation_timeout");
+        if (!currentNavigation(generation, userId)) return;
         openConv(
           cid,
           "dm",
@@ -247,33 +270,40 @@ export function App() {
           [{ userId: c._id, displayName: c.displayName, themeColor: c.themeColor }],
         );
       } catch {
-        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
+        if (currentNavigation(generation, userId)) setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
-    [openConv, startDM, token],
+    [openConv, startDM, token, activity, currentNavigation],
   );
 
   const callContact = useCallback(
     async (c: DirectoryEntry, kind: CallKind) => {
+      const generation = ++activity.navigation, userId = activity.userId;
+      if (activity.inCall) return;
+      setActionError(null);
       try {
-        const cid = await startDM({ token, otherId: c._id });
+        const cid = await withTimeout(startDM({ token, otherId: c._id }), 15_000, "conversation_timeout");
+        if (!currentNavigation(generation, userId) || activity.inCall) return;
         const peers: CallPeer[] = [
           { userId: c._id, displayName: c.displayName, themeColor: c.themeColor, joined: false },
         ];
         await callkit.startCall(cid, kind, peers);
       } catch {
-        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
+        if (currentNavigation(generation, userId)) setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
-    [callkit, startDM, token],
+    [callkit, startDM, token, activity, currentNavigation],
   );
 
   const callConv = useCallback(
     (convId: Id<"conversations">, peers: ConvPeer[], kind: CallKind) => {
+      const generation = ++activity.navigation, userId = activity.userId;
       const callPeers: CallPeer[] = peers.map((p) => ({ ...p, joined: false }));
-      void callkit.startCall(convId, kind, callPeers);
+      void callkit.startCall(convId, kind, callPeers).catch(() => {
+        if (currentNavigation(generation, userId)) setActionError("برقراری تماس ممکن نشد؛ دوباره تلاش کن.");
+      });
     },
-    [callkit],
+    [callkit, activity, currentNavigation],
   );
 
   const callActiveChat = useCallback(() => {
@@ -289,16 +319,19 @@ export function App() {
   const createGroup = useCallback(
     async (members: ConvPeer[]) => {
       if (members.length < 2) return;
+      const generation = ++activity.navigation, userId = activity.userId;
+      setActionError(null);
       try {
-        const cid = await startGroup({ token, memberIds: members.map((m) => m.userId) });
+        const cid = await withTimeout(startGroup({ token, memberIds: members.map((m) => m.userId) }), 15_000, "group_timeout");
+        if (!currentNavigation(generation, userId)) return;
         const name = members.map((m) => m.displayName).join("، ");
         const color = members[0]?.themeColor ?? "#8a6340";
         openConv(cid, "group", name, color, members);
       } catch {
-        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
+        if (currentNavigation(generation, userId)) setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
-    [openConv, startGroup, token],
+    [openConv, startGroup, token, activity, currentNavigation],
   );
 
   // ---- Render states ----
@@ -472,7 +505,7 @@ export function App() {
             kind={active.kind}
             name={active.name}
             color={active.color}
-            onBack={() => setActive(null)}
+            onBack={() => { activity.navigation++; setActive(null); }}
             onCallVideo={callActiveChat}
             onCallAudio={callActiveChatAudio}
             callActive={!!session || callkit.busy}
@@ -483,7 +516,7 @@ export function App() {
             meId={identity._id}
             meName={identity.displayName}
             tab={tab}
-            onTab={setTab}
+            onTab={(next) => { activity.navigation++; setTab(next); }}
             onOpen={(cid, kind, name, color, peers) =>
               openConv(cid as Id<"conversations">, kind, name, color, peers)
             }

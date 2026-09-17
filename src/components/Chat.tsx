@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useSoftQuery } from "../lib/softQuery";
@@ -59,6 +59,8 @@ type ConvInfo = {
 };
 
 type PendingPhoto = { blob: Blob; url: string };
+type MediaPayload = { kind: MessageKind; body?: string; durationMs?: number; replyToId?: Id<"messages"> };
+type MediaAttempt = { clientId: string; storageId?: string; submitted?: MediaPayload };
 
 /** Recording needs both getUserMedia and MediaRecorder (no SSR concern here). */
 const VOICE_SUPPORTED =
@@ -123,6 +125,9 @@ export function Chat({
 
   // ---- chat state ----
   const [draft, setDraft] = useState("");
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const editRestoreRef = useRef<{ draft: string; reply: ReplyQuote | null } | null>(null);
   const [editing, setEditing] = useState<Id<"messages"> | null>(null);
   const [menu, setMenu] = useState<Id<"messages"> | null>(null);
   const [sending, setSending] = useState(false);
@@ -159,8 +164,17 @@ export function Chat({
   const [photoPending, setPhotoPending] = useState<PendingPhoto | null>(null);
   const [mediaBusy, setMediaBusy] = useState(false);
   const mediaBusyRef = useRef(false);
-  const mediaAttempts = useRef(new WeakMap<Blob, { clientId: string; storageId?: string }>());
+  const mediaAttempts = useRef(new WeakMap<Blob, MediaAttempt>());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoOwner = useMemo(() => ({ alive: false, epoch: 0, photo: null as PendingPhoto | null }), [conversationId, token]);
+  useLayoutEffect(() => {
+    photoOwner.alive = true;
+    return () => {
+      photoOwner.alive = false; photoOwner.epoch++;
+      if (photoOwner.photo) URL.revokeObjectURL(photoOwner.photo.url);
+      photoOwner.photo = null;
+    };
+  }, [photoOwner]);
 
   const isGroup = kind === "group";
   const anchored = jumpAnchor != null && anchoredRows != null;
@@ -174,13 +188,11 @@ export function Chat({
     setHighlightId(null);
     setViewing(null);
     setEditing(null);
+    editRestoreRef.current = null;
     setMenu(null);
     setErrMsg(null);
     if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
-    setPhotoPending((prev) => {
-      if (prev) URL.revokeObjectURL(prev.url);
-      return null;
-    });
+    setPhotoPending(null);
     setMediaBusy(false);
   }, [conversationId, token]);
 
@@ -404,6 +416,14 @@ export function Chat({
     }, 2000);
   };
 
+  const finishEditing = useCallback(() => {
+    const restore = editRestoreRef.current;
+    editRestoreRef.current = null;
+    setEditing(null);
+    setDraft(restore?.draft ?? "");
+    setReplying(restore?.reply ?? null);
+  }, []);
+
   const onSend = async () => {
     const text = draft.trim();
     if (!text || sending) return;
@@ -418,9 +438,7 @@ export function Chat({
           showError("ویرایش ذخیره نشد — دوباره تلاش کن");
           return;
         }
-        setEditing(null);
-        setDraft("");
-        saveDraft(conversationId, "");
+        finishEditing();
         forceScrollRef.current = true;
         scrolledRef.current = true;
         return;
@@ -443,7 +461,8 @@ export function Chat({
 
   const handleReply = useCallback(
     (m: ChatMessage) => {
-      setEditing(null);
+      if (sending) return;
+      if (editing) finishEditing();
       const sender = senderOf(m.senderId);
       setReplying({
         id: m._id,
@@ -456,7 +475,7 @@ export function Chat({
       });
       setMenu(null);
     },
-    [senderOf],
+    [senderOf, sending, editing, finishEditing],
   );
 
   // ---- media: upload + send ----
@@ -466,23 +485,23 @@ export function Chat({
       mediaBusyRef.current = true;
       setMediaBusy(true);
       try {
-        const attempt = mediaAttempts.current.get(args.blob) ?? { clientId: newClientMsgId() };
+        const attempt: MediaAttempt = mediaAttempts.current.get(args.blob) ?? { clientId: newClientMsgId() };
         mediaAttempts.current.set(args.blob, attempt);
         if (!attempt.storageId) {
           const up = await withTimeout(uploadUrlMut({ token }), 15_000, "upload_authorization_timeout");
           attempt.storageId = await putStorageFile(up, args.blob, token);
         }
         const storageId = attempt.storageId;
+        // Once a send has been attempted, its ID must always name the SAME
+        // payload. A timeout is not evidence that the server did not commit it.
+        attempt.submitted ??= { kind: args.kind, body: args.body, durationMs: args.durationMs, replyToId: replying?.id };
         await withTimeout(send({
           conversationId,
           token,
-          kind: args.kind,
+          ...attempt.submitted,
           storageId: storageId as Id<"_storage">,
-          body: args.body,
           mimeType: args.blob.type || undefined,
-          durationMs: args.durationMs,
           clientMessageId: attempt.clientId,
-          replyToId: replying?.id,
         }), 15_000, "send_media_timeout");
         return true;
       } catch {
@@ -497,31 +516,43 @@ export function Chat({
   );
 
   const pickImage = async (file: File | null) => {
-    if (!file || !file.type.startsWith("image/")) return;
+    if (!file || mediaBusyRef.current || editing) return;
+    if (!file.type.startsWith("image/")) { showError("یک فایل عکس انتخاب کن."); return; }
+    const epoch = ++photoOwner.epoch;
     try {
-      const blob = await compressImage(file);
-      setPhotoPending({ blob, url: objectUrlFor(blob) });
+      const blob = await withTimeout(compressImage(file), 20_000, "image_decode_timeout");
+      if (!photoOwner.alive || photoOwner.epoch !== epoch) return;
+      const photo = { blob, url: objectUrlFor(blob) };
+      if (photoOwner.photo) URL.revokeObjectURL(photoOwner.photo.url);
+      photoOwner.photo = photo;
+      setPhotoPending(photo);
       setErrMsg(null);
     } catch {
-      showError("خواندن عکس ممکن نشد — عکس دیگری انتخاب کن");
+      if (photoOwner.alive && photoOwner.epoch === epoch) showError("خواندن عکس ممکن نشد — عکس دیگری انتخاب کن");
     }
   };
 
   const cancelPhoto = () => {
-    setPhotoPending((prev) => {
-      if (prev) URL.revokeObjectURL(prev.url);
-      return null;
-    });
-    setDraft("");
+    photoOwner.epoch++;
+    if (photoOwner.photo) URL.revokeObjectURL(photoOwner.photo.url);
+    photoOwner.photo = null;
+    setPhotoPending(null);
+    // Cancelling an attachment never discards text the user already typed.
   };
 
   const sendPhoto = async () => {
-    if (!photoPending) return;
+    const photo = photoPending;
+    if (!photo) return;
     const caption = draft.trim();
-    const ok = await uploadAndSend({ kind: "image", blob: photoPending.blob, body: caption || undefined });
-    if (ok) {
+    const replyId = replying?.id;
+    const ok = await uploadAndSend({ kind: "image", blob: photo.blob, body: caption || undefined });
+    if (ok && photoOwner.alive && photoOwner.photo === photo) {
+      const sent = mediaAttempts.current.get(photo.blob)?.submitted;
       cancelPhoto();
-      setReplying(null);
+      // Preserve text typed while a request was pending, or after an uncertain
+      // send timed out. Retrying the old message must not eat this newer draft.
+      if (draftRef.current.trim() === (sent?.body ?? "")) setDraft("");
+      setReplying(current => current?.id === (sent?.replyToId ?? replyId) ? null : current);
       if (anchored) backToLatest();
       forceScrollRef.current = true;
       scrolledRef.current = true;
@@ -728,7 +759,8 @@ export function Chat({
                       }}
                       onReply={() => handleReply(m)}
                       onEdit={() => {
-                        if (m.isMine && !m.deletedAt && m.kind === "text") {
+                        if (!sending && m.isMine && !m.deletedAt && m.kind === "text") {
+                          if (!editing) editRestoreRef.current = { draft, reply: replying };
                           setReplying(null);
                           setEditing(m._id);
                           setDraft(m.body);
@@ -816,10 +848,8 @@ export function Chat({
           <div className="mb-0.5 flex items-center gap-2 rounded-xl bg-ember-400/12 px-3 py-2 text-sm text-ember-200 ring-1 ring-ember-400/25">
             <Pencil size={15} /> ویرایش پیام
             <button
-              onClick={() => {
-                setEditing(null);
-                setDraft("");
-              }}
+              onClick={finishEditing}
+              disabled={sending}
               className="font-bold"
               aria-label="لغو ویرایش"
             >
@@ -899,6 +929,7 @@ export function Chat({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
+              disabled={!!editing || mediaBusy}
               aria-label="فرستادن عکس"
               title="عکس"
               className="grid h-12 w-11 shrink-0 place-items-center rounded-full text-dusk-600 transition hover:bg-dusk-200/80 active:scale-90"
@@ -920,6 +951,7 @@ export function Chat({
               }}
               rows={1}
               maxLength={4000}
+              disabled={!!editing && sending}
               placeholder={editing ? "ویرایش متن…" : replying ? "پاسخ به " + replying.senderName + "…" : "پیام خود را بنویسید…"}
               className="min-h-[48px] max-h-32 flex-1 resize-none rounded-2xl border border-dusk-300/60 bg-dusk-50/80 px-4 py-3 text-[15px] text-dusk-950 caret-ember-300 shadow-sm outline-none placeholder:text-dusk-600 focus:border-ember-400/70 focus:ring-2 focus:ring-ember-400/30"
             />
@@ -927,7 +959,7 @@ export function Chat({
               <button
                 type="button"
                 onClick={startVoice}
-                disabled={callActive || mediaBusy}
+                disabled={callActive || mediaBusy || !!editing}
                 aria-label="ضبط پیام صوتی"
                 title="پیام صوتی"
                 className="grid h-12 w-11 shrink-0 place-items-center rounded-full text-dusk-600 transition hover:bg-dusk-200/80 active:scale-90"
