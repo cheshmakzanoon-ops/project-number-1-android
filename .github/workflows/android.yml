@@ -40,13 +40,13 @@ jobs:
       - name: Generate disposable release-verification key
         run: |
           keytool -genkeypair -keystore "$RUNNER_TEMP/garma-ci.jks" -storetype JKS -alias ci-verification -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Garma CI Verification Only' -storepass ci-verification-only -keypass ci-verification-only -noprompt
-      - name: Verify optimized release APK and App Bundle
+      - name: Verify release APK and App Bundle
         working-directory: android
         env:
-          GARMA_KEYSTORE_PATH: ${{ runner.temp }}/garma-ci.jks
-          GARMA_KEYSTORE_PASSWORD: ci-verification-only
-          GARMA_KEY_ALIAS: ci-verification
-          GARMA_KEY_PASSWORD: ci-verification-only
+          GARMA_ANDROID_KEYSTORE: ${{ runner.temp }}/garma-ci.jks
+          GARMA_ANDROID_STORE_PASSWORD: ci-verification-only
+          GARMA_ANDROID_KEY_ALIAS: ci-verification
+          GARMA_ANDROID_KEY_PASSWORD: ci-verification-only
         run: gradle --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease :app:lintRelease :app:testReleaseUnitTest
       - name: Require passing tests and a non-debuggable signed release APK
         run: |
@@ -61,7 +61,7 @@ jobs:
           test -s android/app/build/outputs/bundle/release/app-release.aab
           python3 - <<'PY'
           import json, pathlib, xml.etree.ElementTree as ET
-          report = {'scope': 'Native JVM tests, lint and debug/optimized-release compilation. Release signing uses a disposable CI-only key; no installable production release is published.', 'variants': {}}
+          report = {'scope': 'Native JVM tests, lint and debug/release compilation. Release signing uses a disposable CI-only key; no installable production release is published.', 'variants': {}}
           for variant in ['Debug', 'Release']:
               paths = pathlib.Path(f'android/app/build/test-results/test{variant}UnitTest').glob('TEST-*.xml')
               cases = [c for p in paths for c in ET.parse(p).getroot().iter('testcase')]
