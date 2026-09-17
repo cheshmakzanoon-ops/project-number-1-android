@@ -1,8 +1,8 @@
 # Acceptance checklist: calls, media and screen sharing
 
-Unit tests prove the lifecycle rules; they cannot prove a real call between two
-phones. This is the checklist to run on **two separate identities on two
-separate devices** (A and B; on Android, Chrome; plus a desktop browser for the
+Unit tests check lifecycle rules and the isolated browser workflow exercises real
+Convex/LiveKit transport. Neither substitutes for the actual family phones.
+Run this checklist on **two separate identities on two separate devices** (A and B; on Android, Chrome; plus a desktop browser for the
 web screen-share column).
 
 Record the build/commit under test, then walk the list top to bottom. Anything
@@ -13,7 +13,7 @@ exact step, what was expected and what happened.
 
 | # | Step (device A)                                  | Expected                                                                 |
 | - | ------------------------------------------------ | ------------------------------------------------------------------------ |
-| 1 | A opens the chat with B and taps the call button  | B's phone rings within ~2 s (notification + in-app ring if open)          |
+| 1 | A opens the chat with B and taps the call button  | B sees the in-app ring when open; separately measure permitted locked/background notification delivery          |
 | 2 | B answers                                        | both sides hear each other; both screens show the timer running           |
 | 3 | A ends the call                                   | B's screen closes immediately, no leftover ring/vibration                |
 | 4 | B calls A back; A answers                         | audio both ways again (the reversed direction must work too)             |
@@ -33,7 +33,7 @@ exact step, what was expected and what happened.
 | 13 | A flips camera three times quickly               | no stuck "busy" state; the last flip wins                                |
 | 14 | A turns off wifi/data for ~10 s, then restores   | "در حال بازیابی…" appears and the call recovers without re-dialling     |
 | 15 | Group call: A + B + C, then A leaves             | the call continues for B and C; C's screen keeps working                 |
-| 16 | (same A) starts a NEW call to B                  | it starts (A is not blocked by the group call that continued)           |
+| 16 | (same A) calls B again after B and C finish                  | A is not incorrectly treated as busy from the prior group; the new call starts           |
 
 ## 3. Web screen sharing (desktop Chrome)
 
@@ -55,16 +55,16 @@ Prerequisites: the companion APK is installed
 | - | -------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | 23 | A (Android) starts/joins a video call with B, taps «اشتراک صفحه (اپ همراه)» | the app launches with the one-time code; **no token appears in any URL**       |
 | 24 | Android shows its own screen-capture consent              | a system dialog appears **every time** (this is Android's rule, not ours)      |
-| 25 | Tap «شروع/ضبط» (approve)                                  | a persistent notification appears (with an STOP action); B sees A's phone screen |
+| 25 | Tap «شروع/ضبط» (approve)                                  | a persistent notification appears (with a STOP action); B sees A's phone screen |
 | 26 | Open another app on A's phone                             | B sees that app live — the capture is the whole screen, not a camera            |
 | 27 | B keeps talking on the call                               | audio is unaffected; A's camera/mic tiles are unchanged                          |
 | 28 | Tap STOP in the notification                              | capture ends; the notification disappears; B's screen tile disappears           |
 | 29 | Share again (same call)                                   | it works without restarting the phone or the app; B sees the new share          |
-| 30 | While sharing, B hangs up                                  | A's capture ends within ~5 s (server session check) and the notification clears |
+| 30 | While sharing, B hangs up                                  | capture ends at the next successful server check; without server responses the 30 s authorization lease expires |
 | 31 | While sharing, A taps «پایان اشتراک (اپ همراه)» in the browser | the capture ends and B's tile clears                                      |
 | 32 | While sharing, revoke/stop the projection from the system UI | the capture ends and the UI returns to non-sharing on both sides             |
 | 33 | After each of steps 28–32: check the phone's status bar    | no screen-cast/recording indicator remains; no camera/mic dot reappears         |
-| 34 | Try the same button on an Android browser where the API is absent but the companion is NOT installed | an honest message plus an install link — never a silent failure or a fake share |
+| 34 | Try the same button on an Android browser where the API is absent but the companion is NOT installed | an honest message and the bundled installation guide — never a fake share or invented store listing |
 
 ## 5. Failure and edge cases
 
@@ -78,58 +78,45 @@ Prerequisites: the companion APK is installed
 
 ## What is automated already
 
-```bash
-bun tsc -b --noEmit                       # types
-bun run test:call-video                   # 67 tests: lifecycle ownership, backend guards, protocol
-node scripts/verify-call-lifecycle.mjs    # live server rules (dev deployment)
+```sh
+bun run test
+bun run typecheck
+bun run build
 ```
 
-`bun run test:call-video` covers, on top of the pre-existing SDK-event and
-protocol suites:
+The complete application/backend suite covers authorization, durable queues,
+media ownership, bounded operations, display/read state, protocol validation,
+notifications, offline packaging and release-signing contracts. The current
+verified count and workflow evidence are in `release-status.md`.
 
-- a microphone publish that never settles fails with a finite deadline and the
-  clear Persian mic error; a publish that answers after a hangup — or after a
-  **new** call has started — is released and cannot touch the new call;
-- a camera flip that outlives its call is inert, and a `restartTrack` that
-  answers after the call ended releases the capture it installed late;
-- a screen capture that lands after a hangup is released (no late
-  publication); start → stop → start stays truthful; the browser's own "stop
-  sharing" ends the share; an auxiliary companion's screen disappears from the
-  remote tile the moment it unpublishes;
-- an obsolete operation cannot release a **newer** call's microphone/share
-  lock, and a room connect that answers after its deadline is closed again;
-- hangup completes immediately even when the end mutation never resolves.
-- **group-call `already_in_call`** — a member who left a continuing group call
-  can start a new call, while a genuinely present member is still refused; this
-  one runs the real Convex mutations through `convex-test`
-  (`src/convex/calls.test.ts`).
+**Verify real browser integration** runs two independent suites on disposable
+Linux runners, never the live family backend. Messaging exercises invitations,
+real message/media storage, playback, reactions, edits, read receipts, offline
+recovery, both search paths, three-person groups and statuses. Calls exercises
+actual LiveKit transport with advancing decoded video frames and received audio
+packets, mute/camera recovery, connection loss, audio-only redial, decline,
+three-person video, and handoff authorization/revocation. Capture inputs are
+synthetic; do not record physical-phone rows above as passed from this evidence.
 
-`scripts/verify-call-lifecycle.mjs` proves against the real deployment that:
+**Verify Android companion** compiles/tests/lints debug and release variants,
+verifies a non-debuggable signed release APK and builds the App Bundle. Its
+signing key is temporary CI material, not a distribution identity. Native
+compilation is no longer an outstanding blocker. Owner-signed private APK
+packaging is documented in `family-release.md` and `../android/README.md`.
 
-- a member who left a continuing group call can start a new call, while a
-  genuinely present member still cannot (`already_in_call`);
-- a live participant can request a handoff code, the code redeems **once** into
-  the auxiliary `<userId>:screen` identity for that call's room, the minted
-  grant is screen-only and cannot subscribe, a replay is refused, and the
-  session verdict the companion polls flips to `false` the moment the call
-  ends;
-- unissued, malformed, session-less, ended-call and foreign requests are
-  refused, and a code minted *before* the call ended is refused after it.
+`scripts/verify-call-lifecycle.mjs` is now a guarded compatibility entry point
+for the disposable call suite. It refuses ordinary local execution and configured
+external deployment credentials. The old behavior of creating throwaway users
+and calls on the canonical backend has been removed. Use the browser workflow;
+do not run synthetic writes against parents' accounts or conversations.
 
-The one handoff rule that is **unit-tested only** is expiry: the server clamps
-every TTL to ≤60 s and the verdict rejects an expired row
-(`src/lib/screenShareProtocol.test.ts`), but no public API can mint a
-short-TTL row, so the live script does not wait for a real code to age out.
+## What still requires the actual family devices
 
-## What still needs a real device (not automated here)
+Record rows 1–39 on the deployed build and actual phones, with the third family
+member for group calls. Focus on hardware permission handling, front/back camera
+switching, Android consent and STOP behavior, locked/background ringing and the
+actual Wi-Fi/mobile-data paths. These have device/OS/network dependencies that
+neither JVM compilation nor synthetic Chromium capture can certify.
 
-- Every row in sections 1–5 above.
-- The Android companion **build**: this repository's environment has no JDK,
-  Gradle or Android SDK, so `./gradlew :app:assembleDebug` has not been run.
-  Every LiveKit call the module makes was instead checked against the official
-  `livekit-android` **2.28.2 sources jar** (the exact pinned version), which
-  confirms the classes, methods and properties exist as used (see
-  `android/README.md` → *Verification status*). That is not a substitute for a
-  compiler: the first real Gradle build is still yours to run, and until it
-  succeeds treat the Android side of rows 23–34 as **unverified in practice**,
-  not as done.
+Record failures rather than silently narrowing the promised behavior. This
+checklist is for three trusted family users, not a public-store certification.

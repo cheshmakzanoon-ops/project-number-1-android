@@ -107,6 +107,26 @@ export async function messagingFeatures({child,dad,context,register,send,check,u
     await child.getByRole('button',{name:'حذف وضعیت',exact:true}).click();
     await dad.getByRole('button',{name:'وضعیت CI Child',exact:true}).waitFor({state:'hidden'});
   });
+  await check('Persian companion guidance loads offline without replacing the messenger',async()=>{
+    const guide=await child.context().newPage();
+    try {
+      const url=new URL('/screen-share-help.html',child.url()).href;
+      const response=await guide.goto(url);
+      assert.equal(response.status(),200);
+      await guide.getByRole('heading',{name:'نصب اپ همراه گرما',exact:true}).waitFor();
+      assert.equal(await guide.locator('script').count(),0);
+      await until(()=>guide.evaluate(()=>Boolean(navigator.serviceWorker.controller)),'guide controlled by installed worker');
+      await child.context().setOffline(true);
+      await guide.reload({waitUntil:'domcontentloaded'});
+      await guide.getByRole('heading',{name:'نصب اپ همراه گرما',exact:true}).waitFor();
+      assert.equal(new URL(guide.url()).pathname,'/screen-share-help.html');
+    } finally {
+      await child.context().setOffline(false);
+      await guide.close();
+    }
+    await child.getByRole('button',{name:'وضعیت جدید',exact:true}).waitFor();
+    assert.equal(await child.getByRole('button',{name:'ورود به گرما',exact:true}).count(),0);
+  });
 }
 
 export async function groupCall({first,second,device,check,media,frames,until}) {

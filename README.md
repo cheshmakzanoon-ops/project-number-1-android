@@ -1,99 +1,100 @@
 # گرما — Family Messenger
 
-Persian-first family messaging and calling, with name-only registration, a React
-progressive web app, a Convex backend, LiveKit audio/video rooms, Web Push, and
-an Android screen-sharing companion.
+Persian-first messaging and audio/video calling for one small, trusted family.
+The intended rollout is **the owner and two parents**, not a public messaging
+service or a Play Store launch. React/Vite provide the installable web app,
+Convex stores family data, LiveKit carries call media, and a separate Android
+companion supplies screen capture where the browser cannot.
 
-**Release status: not approved for unattended family use.** The repository
-repairs are tested, but the matching backend/frontend deployment and actual
-phones must also pass acceptance. Read [the current release report](docs/release-status.md)
-before sending an installation link to family. Name-only registration is open
-self-enrollment, not an invitation-only family boundary.
+**Code release candidate for private family use.** The prior Android release
+and messaging acceptance failures are resolved. The application passes the
+family verification described in [the release report](docs/release-status.md).
+This does not mean the existing hosted service has been updated: deployment,
+owner signing credentials and the target phones remain separate release steps.
+
+## Included family workflows
+
+Direct and three-person group conversations; text, image and voice messages;
+replies, reactions, edits and deletion; displayed-message read receipts;
+conversation mute; recent and older-message search; text/image statuses and
+view receipts; durable offline outgoing text; audio/video calls, redial,
+decline, group participation and reconnection; web screen sharing and the
+Android screen-sharing handoff. The production worker precaches the app shell
+and lazy-loaded assets without caching private API responses or invite URLs.
+
+**New enrollment requires the private family invitation.** A name alone is not
+a valid new account. Existing device sessions are preserved by the migration.
+Only authenticated family members can retrieve the invitation. Keep that link
+private; it is an enrollment credential, not a public download link. Membership
+and upload ownership checks apply independently of enrollment.
 
 ## Project layout
 
 | Path | Responsibility |
 | --- | --- |
-| `src/components/` | Conversations, voice messages, statuses and call interface |
-| `src/lib/` | Call lifecycle, media ownership, durable text outbox and device support |
-| `src/convex/` | Server-side authorization, data, calls, storage and push actions |
-| `public/` | PWA manifest, service worker and notification actions |
-| `android/` | Native screen capture published into the same LiveKit room |
-| `.github/workflows/` | Web/native verification, live readiness and guarded backend deployment |
+| `src/components/` | Conversations, media, statuses and call interface |
+| `src/lib/` | Media ownership, retries, outbox, device support and PWA behavior |
+| `src/convex/` | Authorization, data, calls, media ownership and push actions |
+| `public/` | Manifest, worker, icons and Persian companion-installation guidance |
+| `android/` | Native screen capture into an authorized existing LiveKit room |
+| `scripts/e2e/` | Disposable real-server browser verification |
+| `.github/workflows/` | Verification, guarded backend deployment and family APK packaging |
 
-The Android module is **only the screen-sharing companion**. It does not contain
-the chat or calling interface. Read [its build and capture instructions](android/README.md).
+The Android APK is **only the screen-sharing companion**. Chat and ordinary
+calling stay in the web app; parents do not need the companion for those.
+There is no claimed Play Store listing. The in-app installation link opens
+bundled Persian instructions, including offline, rather than an invented store URL.
 
 ## Run and verify
 
 ```sh
 bun install --frozen-lockfile
 bun run dev
-bun run test:call-video
+bun run test
 bun run typecheck
 bun run build
 ```
 
-Despite its historical name, `test:call-video` runs the entire web/backend
-regression suite. The reliability repair includes 144 tests covering call
-rendering/lifecycle, microphone cleanup, uploads, message retries, multi-tab
-queue isolation, notification actions, read receipts, shared-media deletion,
-and server-side authorization. Tests involving LiveKit/browser APIs use mocks;
-they are not evidence of a real call between two phones.
+`test:call-video` is retained as an alias for the same complete test suite.
+`bun run build` includes TypeScript, Vite and offline-shell versioning; do not
+publish a hand-built directory that omitted the finalization step. Output is
+`dist/`, including the worker, hashed assets, icons, manifest and help page.
 
-Production output is `dist/`. `Verify family messenger` installs the committed
-lockfile, runs tests, checks TypeScript and builds the frontend. Its short-lived
-artifacts contain the tested source, JUnit report and build output, not secrets
-or production user data.
+GitHub Actions runs four checks: `web`, `browser (messaging)`, `browser (calls)`
+and `android`. Browser checks use the actual built app, fresh Convex/LiveKit
+servers and synthetic media inputs; they do not modify the family deployment.
+Native verification includes debug and release variants, lint, actual JVM tests,
+signed APK validation and App Bundle generation. Its signing key is disposable
+and its release packages are deliberately not distributed.
 
-## One backend, separate deployment steps
+## Configure and release to the three family members
 
-The canonical Convex deployment is hard-coded in `src/main.tsx` and the Android
-BuildConfig. Do not silently replace it with a new backend: that would separate
-existing accounts, conversations and call state. A development preview's local
-proxy is not a production endpoint.
+Follow [the private family release procedure](docs/family-release.md). It lists
+the required server configuration, exact signing-secret names and deployment
+order. No public store, public self-enrollment or enterprise infrastructure is
+required for this scope.
 
-Server-only environment variables belong in Convex, never frontend source:
+The canonical backend remains the existing one pinned in `src/main.tsx` and
+Android `BuildConfig`. Do not replace it with another deployment: doing so would
+separate existing identities, messages and calls. A GitHub push by itself does
+not publish backend functions or replace the frontend host.
 
-- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
-- `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`
+The release procedure uses the existing `Deploy verified backend` workflow,
+which refuses a key for another deployment, followed by the matching HTTPS
+frontend. `Build signed family companion` produces an owner-signed APK for
+private sharing after the owner provides a persistent keystore through Actions
+secrets. No signing keys, deployment keys, invitation codes or private user data
+belong in Git, logs, issues or chat.
 
-A GitHub push does **not** by itself update Convex or the frontend host.
+## Verification boundaries
 
-1. Store a deployment key for the existing canonical backend in the repository's
-   GitHub Actions secret `CONVEX_DEPLOY_KEY`.
-2. Manually run `Deploy verified backend` from `main`. It runs the regression
-   gates and verifies the resolved backend URL before pushing any functions or
-   schema changes. A key for a different deployment is refused.
-3. Run `Check deployed backend`. It performs read-only checks, creates no users
-   or calls, and archives no returned directory data. Its last recorded live
-   directory-privacy check failed; see the release report.
-4. Deploy the matching `dist/` to the actual HTTPS frontend host. No verified
-   hosting account or public frontend URL is recorded in this repository.
-5. Distribute a properly signed Android companion through a verified route and
-   execute [the two-device acceptance checklist](docs/call-manual-acceptance.md).
+The latest observed live-backend privacy check is recorded separately in the
+release report; it is not replaced by a successful isolated test. The repair
+has not deployed that backend or identified the real frontend hosting account.
 
-The storage repair adds `by_storage` indexes without changing existing document
-fields. The new read-receipt `throughId` argument is optional for older clients.
-Backend changes must be deployed before the matching new frontend. Checked-in
-static `_generated` declarations have been synchronized; the authorized Convex
-CLI should regenerate them during deployment rather than treating hand-edited
-declarations as proof of a live schema.
-
-## Call video evidence
-
-`RemoteVideoFeed.tsx` attaches SDK `RemoteVideoTrack` objects to actual video
-elements. With `VITE_CALL_VIDEO_DEBUG=1`, opt-in logs show connection/subscription
-stages and limited receiver statistics. Normal operation does not enable this
-telemetry.
-
-Remote video elements expose `data-call-video`, `data-call-video-play`, and
-`data-call-video-frame`. A room connection or successful `play()` promise is not
-proof of a displayed frame. Verify moving images and audible two-way audio on
-independent devices, then camera switching, mute, hangup/redial, screen-share
-stop/restart, notification actions and network changes.
-
-Full-screen takeover and reliable ringing while locked/closed depend on the
-browser and operating system. A PWA cannot promise native telephone behavior.
-Keep another established way to contact family until the deployed build passes
-on their actual phones and networks.
+Use [the device acceptance checklist](docs/call-manual-acceptance.md) for the
+actual phones. Synthetic browser media proves frame/audio transport, not the
+parents' microphones, cameras, permissions, mobile network, Android projection
+or locked-screen notification delivery. PWA ringing follows browser/OS policy
+and is not a native telephone service. Keep the family's existing contact method
+until the configured deployment passes that short real-device check.

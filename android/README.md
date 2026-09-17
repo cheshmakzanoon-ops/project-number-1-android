@@ -75,11 +75,13 @@ Google/Maven Central provide the normal dependencies; the AudioSwitch group
 used by LiveKit is restricted to its required JitPack repository in
 `settings.gradle.kts`.
 
-Five native unit tests cover authorization-lease expiration/renewal and
-owner-only stop-message eligibility. These are JVM logic tests, not an emulator
-or real MediaProjection capture test. The CI gate also assembles the APK and
-runs Android lint. Debug artifacts are for developer QA, not a production
-signed release.
+Twelve native unit tests run in **each** of the debug and release variants.
+They cover authorization leases, owner-only stopping and companion protocol
+validation. These are JVM logic tests, not emulator or real MediaProjection
+capture tests. CI assembles and lints both variants, generates a release APK and
+App Bundle, verifies the APK signature and rejects a debuggable release. Its
+release-signing key is disposable; those test-signed release packages are deleted,
+not offered to family. The saved debug APK is for developer QA only.
 
 ## Release requirements
 
@@ -95,9 +97,19 @@ Changing the optional App Link host requires changing both the manifest's
 matching `assetlinks.json` for the actual release signing certificate. The
 custom `garma-screenshare://share` scheme does not require App Link verification.
 
-Keep the release keystore outside Git and distribute the signed package through
-a confirmed installation route. Do not assume the Play Store URL in the web UI
-means a listing has been published.
+For the owner's private family release, use **Build signed family companion**.
+It requires `GARMA_ANDROID_KEYSTORE_BASE64`, `GARMA_ANDROID_STORE_PASSWORD`,
+`GARMA_ANDROID_KEY_ALIAS` and `GARMA_ANDROID_KEY_PASSWORD` as repository Actions
+secrets. It decodes the owner's persistent keystore temporarily, builds/tests/lints
+the release APK, verifies signature/package identity, uploads only the APK and
+commit/checksum files, and removes signing material. Keep the keystore backed up
+outside Git; use the same signing identity for future updates. See
+[the family release procedure](../docs/family-release.md) for the exact steps.
+
+The web UI now links to bundled Persian installation guidance, not an unverified
+Play Store page. A public listing is not required to share a signed APK with the
+two parents. This workflow has not produced an owner-signed package in this
+repair because the owner's real signing material was not supplied.
 
 On the actual target Android phones, exercise
 [the manual call acceptance checklist](../docs/call-manual-acceptance.md): consent
