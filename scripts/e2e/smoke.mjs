@@ -86,12 +86,12 @@ try {
   await check('Edit and delete own message update the other browser',async()=>{
     await child.getByText('CI hello from child',{exact:true}).first().click();await child.getByRole('button',{name:'ویرایش',exact:true}).click();
     await child.getByPlaceholder('ویرایش متن…').fill('CI edited text');await child.getByRole('button',{name:'ارسال',exact:true}).click();
-    await dad.getByText('CI edited text',{exact:true}).waitFor();
-    await child.getByText('CI edited text',{exact:true}).click();await child.getByRole('button',{name:'حذف',exact:true}).click();
+    await dad.locator('[data-mid] p').filter({hasText:/^CI edited text$/}).waitFor();
+    await child.locator('[data-mid] p').filter({hasText:/^CI edited text$/}).click();await child.getByRole('button',{name:'حذف',exact:true}).click();
     await dad.getByText('این پیام حذف شد',{exact:true}).waitFor();
   });
   await check('Owned image upload is rendered on the other device',async()=>{
-    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==','base64');
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMCAIAAADZF8uwAAAAF0lEQVR4nGPUTdvDQAgwEVQxqmgAFAEAWIEBZ+DAdM0AAAAASUVORK5CYII=','base64');
     await child.locator('input[type=file]').first().setInputFiles({name:'test.png',mimeType:'image/png',buffer:png});
     await child.getByRole('button',{name:'ارسال عکس',exact:true}).click();
     await until(()=>dad.locator('img').evaluateAll(images=>images.some(i=>i.src.includes('.convex.')&&i.complete&&i.naturalWidth>0)),'recipient image pixels');
