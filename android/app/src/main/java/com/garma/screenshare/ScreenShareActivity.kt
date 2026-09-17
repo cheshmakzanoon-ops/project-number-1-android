@@ -15,42 +15,33 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 
-/**
- * Entry point of the screen-share companion.
- *
- * Flow (nothing more):
- *  1. the browser launches us with `garma-screenshare://share?code=<opaque code>`;
- *  2. we ask Android for MediaProjection consent — the SYSTEM dialog, required
- *     for every new session, which is why this cannot be skipped or automated;
- *  3. on approval we hand the consent result and the code to
- *     [ScreenShareService], which owns the actual capture;
- *  4. this activity goes away; the share is visible through the persistent
- *     notification (with its STOP action) and can outlive the browser tab.
- *
- * The activity deliberately has no UI beyond a single status line, and it
- * never asks for an account, a token or any text input: the code is the only
- * input, and the server decides what it authorizes.
- */
+/** Each share requires Android's consent; the service owns the resulting capture. */
 class ScreenShareActivity : AppCompatActivity() {
-
     private lateinit var status: TextView
     private var handoffCode: String? = null
     private var flowStarted = false
+    private val closeActivity = Runnable { finish() }
 
     private val projectionConsent =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val data = result.data
             if (result.resultCode != Activity.RESULT_OK || data == null) {
-                finishWith(getString(R.string.app_name), "اجازهٔ ضبط صفحه داده نشد.")
-                return
+                finishWith("اجازهٔ ضبط صفحه داده نشد.")
+                return@registerForActivityResult
             }
             val code = handoffCode
             if (code == null) {
-                finishWith(getString(R.string.app_name), "کد اشتراک پیدا نشد.")
-                return
+                finishWith("کد اشتراک پیدا نشد؛ از داخل تماس دوباره تلاش کن.")
+                return@registerForActivityResult
             }
-            startService(code, result.resultCode, data)
-            finish()
+            try {
+                ScreenShareNotifications.ensureChannel(this)
+                val start = ScreenShareService.buildStartIntent(this, code, result.resultCode, data)
+                ContextCompat.startForegroundService(this, start)
+                finish()
+            } catch (_: RuntimeException) {
+                finishWith("اشتراک صفحه شروع نشد؛ به تماس برگرد و دوباره تلاش کن.")
+            }
         }
 
     private val notificationPermission =
@@ -58,79 +49,94 @@ class ScreenShareActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handoffCode = codeFrom(intent)
+        handoffCode = savedInstanceState?.getString("handoffCode") ?: codeFrom(intent)
+        flowStarted = savedInstanceState?.getBoolean("flowStarted", false) ?: false
         status = TextView(this).apply {
             text = getString(R.string.notification_title)
             textSize = 16f
             gravity = Gravity.CENTER
         }
-        setContentView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                gravity = Gravity.CENTER
-                setPadding(48, 48, 48, 48)
-                addView(status)
-            },
-        )
-
+        setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(48, 48, 48, 48)
+            addView(status)
+        })
         if (handoffCode == null) {
-            // Launched from the launcher (or with a malformed link): there is
-            // nothing to share — say so instead of pretending.
-            finishWith(
-                getString(R.string.app_name),
-                "این برنامه فقط از دکمهٔ «اشتراک صفحه» در تماس گرما باز می‌شود.",
-            )
+            finishWith("این برنامه فقط از دکمهٔ «اشتراک صفحه» در تماس گرما باز می‌شود.")
             return
         }
-        if (savedInstanceState == null) startFlow()
+        // ActivityResultRegistry restores an outstanding consent request after rotation.
+        if (!flowStarted) startFlow()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("handoffCode", handoffCode)
+        outState.putBoolean("flowStarted", flowStarted)
+        super.onSaveInstanceState(outState)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Never let a second deep link substitute another call's code underneath
+        // an already visible consent dialog.
+        if (flowStarted) return
+        val code = codeFrom(intent) ?: return
+        status.removeCallbacks(closeActivity)
         setIntent(intent)
-        handoffCode = codeFrom(intent)
-        if (handoffCode != null) startFlow()
+        handoffCode = code
+        startFlow()
     }
 
     private fun startFlow() {
         if (flowStarted) return
         flowStarted = true
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
+                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                askForProjection()
+            }
+        } catch (_: RuntimeException) {
+            finishWith("اجازهٔ اشتراک صفحه باز نشد؛ از داخل تماس دوباره تلاش کن.")
         }
-        askForProjection()
     }
 
     private fun askForProjection() {
         val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
         if (manager == null) {
-            finishWith(getString(R.string.app_name), "این گوشی ضبط صفحه را پشتیبانی نمی‌کند.")
+            finishWith("این گوشی ضبط صفحه را پشتیبانی نمی‌کند.")
             return
         }
-        // Android shows the mandatory consent sheet for every new session.
-        projectionConsent.launch(manager.createScreenCaptureIntent())
+        try {
+            projectionConsent.launch(manager.createScreenCaptureIntent())
+        } catch (_: RuntimeException) {
+            finishWith("اجازهٔ اشتراک صفحه باز نشد؛ از داخل تماس دوباره تلاش کن.")
+        }
     }
 
     private fun hasNotificationPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
 
-    private fun startService(code: String, resultCode: Int, data: Intent) {
-        ScreenShareNotifications.ensureChannel(this)
-        val intent = ScreenShareService.buildStartIntent(this, code, resultCode, data)
-        ContextCompat.startForegroundService(this, intent)
+    private fun finishWith(message: String) {
+        status.text = "${getString(R.string.app_name)}\n$message"
+        status.removeCallbacks(closeActivity)
+        status.postDelayed(closeActivity, 3_500)
     }
 
-    private fun finishWith(title: String, message: String) {
-        status.text = "$title\n$message"
-        status.postDelayed({ finish() }, 3_500)
+    override fun onDestroy() {
+        if (::status.isInitialized) status.removeCallbacks(closeActivity)
+        super.onDestroy()
     }
 
-    /** Only the opaque code is accepted from the link (custom scheme or App Link). */
     private fun codeFrom(intent: Intent?): String? {
         val uri = intent?.data ?: return null
+        if (!uri.isHierarchical) return null
+        val custom = uri.scheme == "garma-screenshare" && uri.host == "share"
+        val appLink = uri.scheme == "https" && uri.host == "garma.app" && uri.path == "/screen-share"
+        if (!custom && !appLink) return null
         val code = uri.getQueryParameter("code") ?: return null
-        return code.takeIf { it.length in 20..128 }
+        return code.takeIf { it.matches(Regex("[A-Za-z0-9_-]{43}")) }
     }
 }
