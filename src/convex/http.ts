@@ -60,7 +60,11 @@ const upload = httpAction(async (ctx, request) => {
   const origin = request.headers.get("Origin");
   if (!allowedOrigin(origin)) return new Response("origin_not_allowed", { status: 403 });
   const headers = new Headers({ "Access-Control-Allow-Origin": origin!, "Vary": "Origin", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
-  const respond = (value: object, status: number) => new Response(JSON.stringify(value), { status, headers: new Headers([...headers, ["Content-Type", "application/json"]]) });
+  const respond = (value: object, status: number) => {
+    const responseHeaders = new Headers(headers);
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify(value), { status, headers: responseHeaders });
+  };
   if (request.method === "OPTIONS") {
     headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
     headers.set("Access-Control-Allow-Headers", "Authorization, Content-Type");
