@@ -22,6 +22,8 @@ jobs:
         with:
           node-version: '22'
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
       - name: Exercise built app with disposable real servers
         run: bash scripts/e2e/run-isolated.sh
@@ -34,4 +36,4 @@ jobs:
             e2e-results/
             src/convex/_generated/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
