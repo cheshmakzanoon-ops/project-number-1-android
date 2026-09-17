@@ -1,0 +1,50 @@
+name: Verify family messenger
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        id: install
+        run: bun install --frozen-lockfile
+      - name: Regression tests
+        if: success()
+        run: bun run test:call-video --reporter=default --reporter=junit --outputFile.junit=test-results.xml
+      - name: Typecheck
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: bun run typecheck
+      - name: Production build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: bun run build
+      - name: Archive exact tested source
+        if: ${{ !cancelled() }}
+        run: git archive --format=tar HEAD | gzip > source.tar.gz
+      - name: Upload verification evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-verification-${{ github.sha }}
+          path: |
+            source.tar.gz
+            test-results.xml
+            dist/
+          retention-days: 7
+          if-no-files-found: error
