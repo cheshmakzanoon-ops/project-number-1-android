@@ -82,3 +82,50 @@ it("rejects incomplete shell installation instead of activating a broken update"
   cache.addAll.mockRejectedValue(new Error("one asset failed"));
   await expect(fire("install")).rejects.toThrow();expect(self.skipWaiting).not.toHaveBeenCalled();
 });
+
+it("serves a retained immutable chunk to an already-open old tab while offline", async () => {
+  const { fire, caches, fetch } = worker();
+  const oldRequest = { method: "GET", url: "https://garma.test/assets/old-release-Bf2s0x.js", mode: "cors" };
+  const previous = { match: vi.fn().mockResolvedValue(new Response("old chunk")) };
+  caches.open.mockImplementation(async (key: string) => key === "garma-shell-v6" ? previous : { match: vi.fn(), put: vi.fn() });
+  const [response] = await fire("fetch", { request: oldRequest });
+  expect(response).toBeInstanceOf(Response);
+  expect(await (response as Response).text()).toBe("old chunk");
+  expect(previous.match).toHaveBeenCalledWith(oldRequest);
+  expect(fetch).not.toHaveBeenCalled();
+});
+it("never replaces a revision's pinned offline HTML with a newer network page", async () => {
+  const { fire, caches, fetch } = worker(); const cache = await caches.open();
+  caches.match.mockResolvedValue(new Response("installed shell"));
+  fetch.mockResolvedValue(new Response("new deployment shell"));
+  const request = { method: "GET", url: "https://garma.test/", mode: "navigate" };
+  const [online] = await fire("fetch", { request });
+  expect(await (online as Response).text()).toBe("new deployment shell");
+  expect(cache.put).not.toHaveBeenCalled();
+  fetch.mockRejectedValue(new Error("offline"));
+  const [offline] = await fire("fetch", { request });
+  expect(await (offline as Response).text()).toBe("installed shell");
+});
+it("does not serve the HTML shell for a missing old JavaScript chunk", async () => {
+  const { fire } = worker();
+  const [response] = await fire("fetch", { request: { method: "GET", url: "https://garma.test/assets/old-release-Bf2s0x.js", mode: "cors" } });
+  expect(response).toBeInstanceOf(Response);
+  expect((response as Response).status).toBe(503);
+  expect((response as Response).headers.get("Content-Type")).toContain("text/plain");
+});
+it("does not copy unlisted assets from the network into a revision cache", async () => {
+  const { fire, caches, fetch } = worker(); const cache = await caches.open();
+  fetch.mockResolvedValue(new Response("newly requested chunk"));
+  const [response] = await fire("fetch", { request: { method: "GET", url: "https://garma.test/assets/new-release-Bf2s0x.js", mode: "cors" } });
+  expect(response).toBeInstanceOf(Response);
+  expect(await (response as Response).text()).toBe("newly requested chunk");
+  expect(cache.put).not.toHaveBeenCalled();
+});
+it("ignores query-string assets and unrelated cache namespaces", async () => {
+  const { fire, caches } = worker();
+  expect(await fire("fetch", { request: { method: "GET", url: "https://garma.test/assets/private.js?token=secret", mode: "cors" } })).toEqual([]);
+  caches.open.mockImplementation(async (key: string) => ({ match: vi.fn().mockResolvedValue(key === "unrelated-cache" ? new Response("private") : undefined) }));
+  const [response] = await fire("fetch", { request: { method: "GET", url: "https://garma.test/assets/old-release-Bf2s0x.js", mode: "cors" } });
+  expect((response as Response).status).toBe(503);
+  expect(caches.open).not.toHaveBeenCalledWith("unrelated-cache");
+});

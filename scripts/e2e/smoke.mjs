@@ -86,8 +86,8 @@ try {
   await check('Edit and delete own message update the other browser',async()=>{
     await child.getByText('CI hello from child',{exact:true}).first().click();await child.getByRole('button',{name:'ویرایش',exact:true}).click();
     await child.getByPlaceholder('ویرایش متن…').fill('CI edited text');await child.getByRole('button',{name:'ارسال',exact:true}).click();
-    await dad.locator('[data-mid] p').filter({hasText:/^CI edited text$/}).waitFor();
-    await child.locator('[data-mid] p').filter({hasText:/^CI edited text$/}).click();await child.getByRole('button',{name:'حذف',exact:true}).click();
+    await dad.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI edited text$/}).waitFor();
+    await child.locator('[data-mid] p.whitespace-pre-wrap').filter({hasText:/^CI edited text$/}).click();await child.getByRole('button',{name:'حذف',exact:true}).click();
     await dad.getByText('این پیام حذف شد',{exact:true}).waitFor();
   });
   await check('Owned image upload is rendered on the other device',async()=>{

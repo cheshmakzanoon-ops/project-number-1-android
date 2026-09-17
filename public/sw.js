@@ -83,15 +83,26 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   // Private APIs, arbitrary media, and URL commands never enter the cache.
   const cacheable = !url.search && SHELL.includes(url.pathname);
-  if (!cacheable && req.mode !== "navigate") return;
+  // An old tab may request an immutable chunk from the retained prior shell.
+  // It is not in this revision's SHELL, but its exact cached bytes remain valid.
+  const immutableAsset = !url.search && url.pathname.startsWith("/assets/");
+  if (!cacheable && !immutableAsset && req.mode !== "navigate") return;
   event.respondWith((async () => {
     // Storage can be disabled or evicted while the worker is still active.
     const cache = await caches.open(CACHE).catch(() => null);
     const match = async (key) => { try { return await cache?.match(key); } catch { return undefined; } };
     // Vite asset names are content-addressed, so the precached copy is final.
-    if (cacheable && url.pathname.startsWith("/assets/")) {
+    if (immutableAsset) {
       const asset = await match(req);
       if (asset) return asset;
+      try {
+        const previous = (await caches.keys()).filter(key => key.startsWith("garma-shell-") && key !== CACHE).reverse();
+        for (const key of previous) {
+          const oldCache = await caches.open(key);
+          const oldAsset = await oldCache.match(req);
+          if (oldAsset) return oldAsset;
+        }
+      } catch { /* Cache eviction/denial must not prevent a network attempt. */ }
     }
     try {
       const response = await networkWithDeadline(req);
@@ -99,12 +110,15 @@ self.addEventListener("fetch", (event) => {
         const shell = await match("/");
         if (shell) return shell;
       }
-      if (response.ok && cacheable && cache) {
+      // The installed HTML must remain paired with the assets fetched during
+      // installation. A newer deployment's HTML can be displayed online, but
+      // caching it here would mix revisions and break the next offline reload.
+      if (response.ok && cacheable && url.pathname !== "/" && req.mode !== "navigate" && cache) {
         try { await cache.put(req, response.clone()); } catch { /* quota: network still succeeds */ }
       }
       return response;
     } catch {
-      const cached = await match(cacheable ? req : "/");
+      const cached = await match(req.mode === "navigate" ? "/" : req);
       if (cached) return cached;
       if (req.mode === "navigate") {
         const shell = await match("/");
