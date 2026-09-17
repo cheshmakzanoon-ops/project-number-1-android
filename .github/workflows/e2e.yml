@@ -1,0 +1,37 @@
+name: Verify real browser integration
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'public/**', 'scripts/**', 'package.json', 'bun.lock', 'convex.json', 'vite.config.ts', 'index.html', '.github/workflows/e2e.yml']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: browser-integration-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - name: Exercise built app with disposable real servers
+        run: bash scripts/e2e/run-isolated.sh
+      - name: Save synthetic-only browser evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-integration-${{ github.sha }}
+          path: |
+            e2e-results/
+            src/convex/_generated/
+          retention-days: 7
+          if-no-files-found: warn
