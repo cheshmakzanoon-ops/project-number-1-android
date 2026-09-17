@@ -37,6 +37,9 @@ jobs:
       - name: Archive exact tested source
         if: ${{ !cancelled() }}
         run: git archive --format=tar HEAD | gzip > source.tar.gz
+      - name: Retain test toolchain for offline verification
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: tar -czf test-toolchain.tar.gz node_modules
       - name: Upload verification evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -45,6 +48,7 @@ jobs:
           path: |
             source.tar.gz
             test-results.xml
+            test-toolchain.tar.gz
             dist/
           retention-days: 7
           if-no-files-found: error
