@@ -238,6 +238,9 @@ export function Chat({
     const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickRef.current = fromBottom < 160;
     setShowJump(fromBottom > 480);
+    // New messages may arrive while scrolled up; reaching the bottom later is
+    // also a read event, even when the latest message ID has not changed.
+    if (stickRef.current) readLatest();
   };
 
   useEffect(() => {
@@ -306,15 +309,28 @@ export function Chat({
 
   // Only the visible latest view advances the read cursor.
   const latestId = latest.at(-1)?._id;
+  const readInFlight = useRef<string | null>(null);
+  const lastRead = useRef<string | null>(null);
+  const readLatest = useCallback(() => {
+    if (jumpAnchor || !latestId || !token || document.visibilityState !== "visible" || !stickRef.current) return;
+    const key = `${conversationId}:${token}:${latestId}`;
+    if (lastRead.current === key || readInFlight.current === key) return;
+    readInFlight.current = key;
+    void markRead({ conversationId, token, throughId: latestId }).then(() => {
+      lastRead.current = key;
+    }).catch(() => {}).finally(() => {
+      if (readInFlight.current === key) readInFlight.current = null;
+    });
+  }, [latestId, conversationId, token, jumpAnchor, markRead]);
   useEffect(() => {
-    const read = () => {
-      if (anchored || !latestId || document.visibilityState !== "visible" || !stickRef.current) return;
-      void markRead({ conversationId, token }).catch(() => {});
+    readLatest();
+    document.addEventListener("visibilitychange", readLatest);
+    window.addEventListener("online", readLatest);
+    return () => {
+      document.removeEventListener("visibilitychange", readLatest);
+      window.removeEventListener("online", readLatest);
     };
-    read();
-    document.addEventListener("visibilitychange", read);
-    return () => document.removeEventListener("visibilitychange", read);
-  }, [latestId, conversationId, token, anchored, markRead]);
+  }, [readLatest]);
 
   // close menu on Escape
   useEffect(() => {

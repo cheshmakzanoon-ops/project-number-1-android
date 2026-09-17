@@ -65,7 +65,8 @@ export default defineSchema({
   })
     .index("by_conversation_created", ["conversationId", "createdAt"])
     .index("by_conversation", ["conversationId"])
-    .index("by_sender_client", ["senderId", "clientMessageId"]),
+    .index("by_sender_client", ["senderId", "clientMessageId"])
+    .index("by_storage", ["storageId"]),
 
   reactions: defineTable({
     messageId: v.id("messages"),
@@ -96,7 +97,8 @@ export default defineSchema({
     ),
   })
     .index("by_user", ["userId"])
-    .index("by_created", ["createdAt"]),
+    .index("by_created", ["createdAt"])
+    .index("by_storage", ["storageId"]),
 
   // Web Push subscriptions, one per device that granted notifications.
   pushSubscriptions: defineTable({

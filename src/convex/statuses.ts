@@ -1,6 +1,7 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { deleteUnreferencedStorage } from "./storageCleanup";
 import type { Id } from "./_generated/dataModel";
 
 /**
@@ -61,14 +62,17 @@ async function liveRows(ctx: QueryCtx) {
 }
 
 /** Delete everything I posted that has already expired (housekeeping). */
-async function pruneMine(ctx: { db: MutationCtx["db"] }, me: Id<"users">) {
+async function pruneMine(ctx: MutationCtx, me: Id<"users">) {
   const now = Date.now();
   const mine = await ctx.db
     .query("statuses")
     .withIndex("by_user", (q) => q.eq("userId", me))
     .collect();
   for (const s of mine) {
-    if (now - s.createdAt > STATUS_TTL_MS) await ctx.db.delete(s._id);
+    if (now - s.createdAt >= STATUS_TTL_MS) {
+      await ctx.db.delete(s._id);
+      await deleteUnreferencedStorage(ctx, s.storageId);
+    }
   }
 }
 
@@ -138,14 +142,8 @@ export const remove = mutation({
     if (!me) return;
     const row = await ctx.db.get(args.statusId);
     if (!row || row.userId !== me) return;
-    if (row.storageId) {
-      try {
-        await ctx.storage.delete(row.storageId);
-      } catch {
-        /* already gone — the row itself is what matters */
-      }
-    }
     await ctx.db.delete(args.statusId);
+    await deleteUnreferencedStorage(ctx, row.storageId);
   },
 });
 
@@ -174,7 +172,10 @@ export const mine = query({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return [];
-    const rows = await liveRows(ctx);
+    const rows = await ctx.db.query("statuses")
+      .withIndex("by_user", q => q.eq("userId", me))
+      .filter(q => q.gt(q.field("createdAt"), Date.now() - STATUS_TTL_MS))
+      .order("desc").take(200);
     const out: Awaited<ReturnType<typeof statusView>>[] = [];
     for (const row of rows) {
       if (row.userId !== me) continue;
@@ -190,7 +191,10 @@ export const forOwner = query({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return [];
-    const rows = await liveRows(ctx);
+    const rows = await ctx.db.query("statuses")
+      .withIndex("by_user", q => q.eq("userId", args.ownerId))
+      .filter(q => q.gt(q.field("createdAt"), Date.now() - STATUS_TTL_MS))
+      .order("desc").take(200);
     const out: Awaited<ReturnType<typeof statusView>>[] = [];
     for (const row of rows) {
       if (row.userId !== args.ownerId) continue;
@@ -208,7 +212,8 @@ export const view = mutation({
     if (!me) return;
     const row = await ctx.db.get(args.statusId);
     if (!row || row.userId === me) return;
-    if (Date.now() - row.createdAt > STATUS_TTL_MS) return;
+    if (Date.now() - row.createdAt >= STATUS_TTL_MS) return;
+    if ((row.viewers ?? []).some(viewer => viewer.userId === me)) return;
     const meDoc = await ctx.db.get(me);
     if (!meDoc) return;
     const viewers = (row.viewers ?? []).filter((v) => v.userId !== me);
@@ -249,6 +254,9 @@ export const cleanupExpired = mutation({
       .withIndex("by_created", (q) => q.lt("createdAt", now - STATUS_TTL_MS))
       .order("asc")
       .take(30);
-    for (const s of expired) await ctx.db.delete(s._id);
+    for (const s of expired) {
+      await ctx.db.delete(s._id);
+      await deleteUnreferencedStorage(ctx, s.storageId);
+    }
   },
 });

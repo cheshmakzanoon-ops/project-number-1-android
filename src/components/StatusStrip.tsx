@@ -63,10 +63,22 @@ export function StatusStrip({
   const [err, setErr] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const refresh = () => setNow(Date.now());
+    const timer = window.setInterval(refresh, 30_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
+  }, []);
+  useEffect(() => {
+    return () => { if (photo) URL.revokeObjectURL(photo.url); };
+  }, [photo]);
+
   // Group the feed by owner (each person = one ring, newest first inside).
   const byOwner = useMemo(() => {
     const map = new Map<Id<"users">, StatusRow[]>();
     for (const s of feed ?? []) {
+      if (s.expiresAt <= now) continue;
       const arr = map.get(s.ownerId) ?? [];
       arr.push(s);
       map.set(s.ownerId, arr);
@@ -74,14 +86,7 @@ export function StatusStrip({
     return [...map.entries()].sort(
       (a, b) => (b[1][0]?.createdAt ?? 0) - (a[1][0]?.createdAt ?? 0),
     );
-  }, [feed]);
-
-  // Re-render every 30s so «X ساعت پیش» labels stay fresh.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = window.setInterval(() => setTick(Date.now()), 30_000);
-    return () => window.clearInterval(id);
-  }, []);
+  }, [feed, now]);
 
   useEffect(() => {
     if (!err) return;
@@ -122,7 +127,7 @@ export function StatusStrip({
     }
   }, [photo, post, text, token, uploadUrl]);
 
-  const mineAll = mine ?? [];
+  const mineAll = (mine ?? []).filter(s => s.expiresAt > now);
   const hasMine = mineAll.length > 0;
 
   return (
@@ -172,7 +177,7 @@ export function StatusStrip({
           );
         })}
 
-        {(feed?.length ?? 0) === 0 && !hasMine && (
+        {byOwner.length === 0 && !hasMine && (
           <div className="flex flex-1 flex-col items-start justify-center px-2 py-6">
             <p className="text-sm font-extrabold text-dusk-900">هنوز وضعیتی نیست</p>
             <p className="mt-1 max-w-[16rem] text-xs leading-5 text-dusk-600">
@@ -393,12 +398,9 @@ function StatusViewer({
 
   const advance = useCallback(() => {
     setProgress(0);
-    setIdx((i) => {
-      if (i + 1 < list.length) return i + 1;
-      onClose();
-      return i;
-    });
-  }, [list.length, onClose]);
+    if (idx + 1 < list.length) setIdx(idx + 1);
+    else onClose();
+  }, [idx, list.length, onClose]);
 
   // 6 seconds per status, auto-advance.
   useEffect(() => {
@@ -410,7 +412,7 @@ function StatusViewer({
       });
     }, 120);
     return () => window.clearInterval(id);
-  }, [current]);
+  }, [current?._id]);
 
   useEffect(() => {
     if (progress >= 100) advance();

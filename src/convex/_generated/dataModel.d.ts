@@ -215,6 +215,7 @@ export type DataModel = {
       by_creation_time: ["_creationTime"];
       by_conversation: ["conversationId", "_creationTime"];
       by_conversation_created: ["conversationId", "createdAt", "_creationTime"];
+      by_storage: ["storageId", "_creationTime"];
       by_sender_client: ["senderId", "clientMessageId", "_creationTime"];
     };
     searchIndexes: {};
@@ -342,6 +343,7 @@ export type DataModel = {
       by_id: ["_id"];
       by_creation_time: ["_creationTime"];
       by_created: ["createdAt", "_creationTime"];
+      by_storage: ["storageId", "_creationTime"];
       by_user: ["userId", "_creationTime"];
     };
     searchIndexes: {};

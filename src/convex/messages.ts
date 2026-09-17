@@ -1,6 +1,7 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { deleteUnreferencedStorage } from "./storageCleanup";
 import type { Doc, Id } from "./_generated/dataModel";
 
 export type MessageKind = "text" | "image" | "voice";
@@ -117,7 +118,7 @@ async function enrich(ctx: Pick<QueryCtx, "db" | "storage">, msgs: MsgDoc[], me:
       editedAt: m.editedAt,
       deletedAt: m.deletedAt,
       isMine: m.senderId === me,
-      read: isDM && m.senderId === me && !m.deletedAt && m.createdAt <= otherReadAt,
+      read: isDM && m.senderId === me && !m.deletedAt && m._creationTime <= otherReadAt,
       reactions: m.deletedAt ? [] : Object.entries(counts).map(([emoji, count]) => ({ emoji, count })),
       usersReacted,
       clientMessageId: m.clientMessageId,
@@ -155,11 +156,13 @@ export const list = query({
     if (!me) return [];
     if (!(await membershipOf(ctx, args.conversationId, me))) return [];
 
+    const limit = args.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("invalid_limit");
     const msgs = await ctx.db
       .query("messages")
       .withIndex("by_conversation_created", (q) => q.eq("conversationId", args.conversationId))
       .order("desc")
-      .take(args.limit ?? 100);
+      .take(limit);
     return await enrich(ctx, msgs, me);
   },
 });
@@ -181,15 +184,15 @@ export const listAround = query({
     const [before, after] = await Promise.all([
       ctx.db
         .query("messages")
-        .withIndex("by_conversation_created", (q) =>
-          q.eq("conversationId", args.conversationId).lt("createdAt", anchor.createdAt),
+        .withIndex("by_conversation", (q) =>
+          q.eq("conversationId", args.conversationId).lt("_creationTime", anchor._creationTime),
         )
         .order("desc")
         .take(35),
       ctx.db
         .query("messages")
-        .withIndex("by_conversation_created", (q) =>
-          q.eq("conversationId", args.conversationId).gt("createdAt", anchor.createdAt),
+        .withIndex("by_conversation", (q) =>
+          q.eq("conversationId", args.conversationId).gt("_creationTime", anchor._creationTime),
         )
         .order("asc")
         .take(35),
@@ -310,8 +313,8 @@ export const send = mutation({
       replyToId,
     });
     await ctx.db.patch(args.conversationId, { lastMessageAt: now });
-    // update my read cursor so own messages don't show as unread
-    await ctx.db.patch(membership._id, { lastReadAt: now });
+    // Sending from an older/anchored view is not evidence that newer incoming
+    // messages were seen. The unread query already excludes our own messages.
     return messageId;
   },
 });
@@ -345,6 +348,7 @@ export const remove = mutation({
     const msg = await ctx.db.get(args.messageId);
     if (!me || !msg || msg.senderId !== me || msg.deletedAt) throw new Error("unauthorized");
     await ctx.db.patch(args.messageId, { deletedAt: Date.now() });
+    await deleteUnreferencedStorage(ctx, msg.storageId);
   },
 });
 

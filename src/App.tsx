@@ -54,7 +54,7 @@ export function App() {
   // query refreshes in the background, so repeat visits never wait on a
   // network round-trip before showing anything.
   const [cachedMe, setCachedMe] = useState<CachedIdentity | null>(() => loadCachedIdentity());
-  const me = queryMe ?? cachedMe;
+  const me = queryMe === undefined ? cachedMe : queryMe;
   const register = useMutation(api.users.register);
   const startDM = useMutation(api.conversations.startDM);
   const startGroup = useMutation(api.conversations.startGroup);
@@ -164,6 +164,7 @@ export function App() {
       setCachedMe(null);
     } else if (queryMe) {
       saveCachedIdentity(queryMe);
+      setCachedMe(queryMe);
     }
   }, [queryMe]);
 
@@ -201,7 +202,7 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", onOnline);
     };
-  }, [me, token, heartbeat]);
+  }, [me?._id, token, heartbeat]);
 
   const handleRegister = useCallback(
     async (name: string) => {
@@ -319,7 +320,7 @@ export function App() {
   // No connection and no (refreshed) identity: surface the retry panel. An
   // immediate query error counts as unreachable too — no 9s wait on a dead/
   // mismatched backend.
-  if ((connTrouble && queryMe === undefined) || meUnavailable) return connTroubleScreen(true);
+  if (!me && ((connTrouble && queryMe === undefined) || meUnavailable)) return connTroubleScreen(true);
   // First visit on this device: nothing cached yet, wait briefly.
   if (queryMe === undefined && cachedMe === null) return connTroubleScreen(false);
   // The backend doesn't know this device token (fresh install / reset): sign up.
@@ -368,6 +369,11 @@ export function App() {
       style={{ background: "var(--color-dusk-50)" }}
     >
       <InstallBanner />
+      {me && (meUnavailable || connTrouble) && (
+        <div role="status" className="mx-3 mt-2 rounded-xl border border-ember-400/30 bg-dusk-100 px-3 py-2 text-sm text-dusk-900">
+          اتصال پیام‌ها موقتاً قطع شده؛ دوباره وصل می‌شویم. کنترل‌های تماس همچنان در دسترس است.
+        </div>
+      )}
       {actionError && <div role="alert" className="m-3 rounded-xl bg-rose-500/15 p-3 text-sm">
         {actionError}<button type="button" onClick={() => setActionError(null)} className="mr-3 underline">بستن</button>
       </div>}

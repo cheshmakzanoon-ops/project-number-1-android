@@ -74,6 +74,7 @@ object HandoffClient {
     private fun post(endpoint: String, body: String): JSONObject {
         val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
+            instanceFollowRedirects = false
             connectTimeout = 10_000
             readTimeout = 15_000
             doOutput = true
@@ -82,15 +83,25 @@ object HandoffClient {
         try {
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val status = conn.responseCode
-            val text = (if (status in 200..299) conn.inputStream else conn.errorStream)
-                ?.let { stream -> BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).readText() }
-                ?: ""
+            if (status !in 200..299) throw IOException("http_$status")
+            val text = conn.inputStream.use { stream ->
+                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
+                    val chars = CharArray(65_537)
+                    var count = 0
+                    while (count < chars.size) {
+                        val read = reader.read(chars, count, chars.size - count)
+                        if (read == -1) break
+                        count += read
+                    }
+                    if (count > 65_536) throw IOException("response_too_large")
+                    String(chars, 0, count)
+                }
+            }
             if (text.isEmpty()) throw IOException("empty_response")
             val json = JSONObject(text)
             if (json.optString("status") != "success") {
-                // The server's own reason is short and carries no credential
-                // ("handoff_invalid", "unauthorized", …).
-                throw IOException(json.optString("errorMessage", "request_failed").take(180))
+                // Do not propagate server-provided stack traces or credentials.
+                throw IOException("request_failed")
             }
             return json.getJSONObject("value")
         } finally {

@@ -54,10 +54,11 @@ export const myConversations = query({
             .first(),
           ctx.db
             .query("messages")
-            .withIndex("by_conversation_created", (q) =>
-              q.eq("conversationId", conv._id).gt("createdAt", m.lastReadAt),
+            .withIndex("by_conversation", (q) =>
+              q.eq("conversationId", conv._id).gt("_creationTime", m.lastReadAt),
             )
-            .take(101),
+            .filter((q) => q.and(q.neq(q.field("senderId"), me), q.eq(q.field("deletedAt"), undefined)))
+            .take(100),
         ]);
 
         const memberUsers = await Promise.all(
@@ -283,7 +284,9 @@ export const startDM = mutation({
 });
 
 export const markRead = mutation({
-  args: { conversationId: v.id("conversations"), token: v.string() },
+  // Snapshot ID prevents a mutation queued offline from acknowledging unseen
+  // arrivals. Optional for older clients; new clients always send it.
+  args: { conversationId: v.id("conversations"), token: v.string(), throughId: v.optional(v.id("messages")) },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
@@ -292,8 +295,15 @@ export const markRead = mutation({
       .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
       .filter((q) => q.eq(q.field("userId"), me))
       .first();
-    if (membership) {
-      await ctx.db.patch(membership._id, { lastReadAt: Date.now() });
+    if (!membership) return;
+    const through = args.throughId
+      ? await ctx.db.get(args.throughId)
+      : await ctx.db.query("messages")
+          .withIndex("by_conversation", (q) => q.eq("conversationId", args.conversationId))
+          .order("desc").first();
+    if (!through || through.conversationId !== args.conversationId) return;
+    if (through._creationTime > membership.lastReadAt) {
+      await ctx.db.patch(membership._id, { lastReadAt: through._creationTime });
     }
   },
 });

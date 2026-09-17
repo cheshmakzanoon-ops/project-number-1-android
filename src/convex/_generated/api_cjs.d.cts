@@ -117,7 +117,7 @@ export declare const api: {
     markRead: FunctionReference<
       "mutation",
       "public",
-      { conversationId: Id<"conversations">; token: string },
+      { conversationId: Id<"conversations">; token: string; throughId?: Id<"messages"> },
       any
     >;
     myConversations: FunctionReference<
