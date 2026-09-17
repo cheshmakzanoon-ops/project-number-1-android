@@ -1,0 +1,38 @@
+name: Deploy verified backend
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+      - name: Check deployment authorization
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: |
+          if [ -z "$CONVEX_DEPLOY_KEY" ]; then
+            echo '::error::Add CONVEX_DEPLOY_KEY for the canonical deployment as a GitHub Actions repository secret. Never commit it.'
+            exit 1
+          fi
+      - run: bun install --frozen-lockfile
+      - run: bun run test:call-video
+      - run: bun run typecheck
+      - run: bun run build
+      - name: Deploy only to the existing family backend
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        run: bunx convex deploy --yes --typecheck enable --cmd 'node scripts/check-deploy-target.mjs' --cmd-url-env-var-name GARMA_DEPLOY_URL
