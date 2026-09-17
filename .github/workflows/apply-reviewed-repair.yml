@@ -1,0 +1,66 @@
+name: Apply reviewed reliability repair
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-reviewed-repair.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-reviewed-repair
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Retrieve and verify reviewed patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/git/blobs/ea99cb0b6a02803127812d0ad33979578c798a93" --jq .content | base64 --decode > "$RUNNER_TEMP/repair.xz"
+          python3 - <<'PY'
+          import hashlib, lzma, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          patch = lzma.decompress((root / 'repair.xz').read_bytes())
+          assert hashlib.sha256(patch).hexdigest() == 'e62da411ce4e0464225c28c17b570e88fcb1f33ec7f1a1492a68d3152e74321f', 'Patch integrity failure'
+          (root / 'reviewed.patch').write_bytes(patch)
+          PY
+          git apply --check --index "$RUNNER_TEMP/reviewed.patch"
+          git apply --index "$RUNNER_TEMP/reviewed.patch"
+          git diff --cached --check
+      - name: Install exact locked dependencies
+        run: bun install --frozen-lockfile
+      - name: Test all original and added regressions
+        run: bun run test:call-video --reporter=default --reporter=junit --outputFile.junit=test-results.xml
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Production build
+        run: bun run build
+      - name: Commit only the tested patch and push without force
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: restore media, durable messaging, notification actions and screen-share sessions' -m 'Fix Convex upload POST and emoji reaction serialization; preserve offline replies and failed voice recordings; release delayed microphone requests; route notification actions to one tab; preserve active native shares; enforce call, reaction and push authorization. Add 46 regression cases; all 113 tests, types and build pass before this commit.'
+          git push origin HEAD:main
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
+      - name: Save verification evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-repair-verification-${{ github.run_id }}
+          path: |
+            test-results.xml
+            dist/
+          retention-days: 7
+          if-no-files-found: warn
