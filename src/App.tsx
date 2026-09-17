@@ -475,6 +475,7 @@ export function App() {
             onBack={() => setActive(null)}
             onCallVideo={callActiveChat}
             onCallAudio={callActiveChatAudio}
+            callActive={!!session || callkit.busy}
           />
         ) : (
           <Lobby

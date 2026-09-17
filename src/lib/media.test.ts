@@ -104,3 +104,13 @@ describe("microphone ownership", () => {
     mic.request.resolve(mic.stream); await tick(); expect(mic.track.stop).toHaveBeenCalledOnce();
   });
 });
+
+it("releases the microphone synchronously on Stop, before encoder completion", async () => {
+  const mic = microphone(); const handle = startRecording(); mic.request.resolve(mic.stream); await tick();
+  const recorder = Recorder.instances[0]; recorder.stop.mockImplementation(() => { recorder.state = "inactive"; });
+  const result = handle.stop();
+  expect(mic.track.stop).toHaveBeenCalledOnce();
+  recorder.ondataavailable?.({ data: new Blob(["voice"], {type:"audio/mp4"}) }); recorder.onstop?.();
+  expect((await result).blob.size).toBeGreaterThan(0);
+  expect(mic.track.stop).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+});

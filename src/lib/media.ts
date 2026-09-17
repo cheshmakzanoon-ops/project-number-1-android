@@ -183,6 +183,10 @@ export function startRecording(opts?: {
     clearInterval(timer);
     stopDeadline = setTimeout(() => fail(new Error("recorder_stop_timeout")), 5_000);
     try { if (rec.state !== "inactive") rec.stop(); } catch (e) { fail(e as Error); }
+    // Stop gathering immediately, while the queued dataavailable/stop events
+    // finish encoding. A call must not contend with this recorder for the mic.
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
     return result;
   };
   const permissionDeadline = setTimeout(() => fail(new Error("microphone_timeout")), 30_000);

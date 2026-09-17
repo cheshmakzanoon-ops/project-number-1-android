@@ -28,12 +28,13 @@ import { MessageActions } from "./MessageActions";
 import { clock, fa, formatDay, relative } from "../lib/format";
 import { loadDraft, newClientMsgId, saveDraft } from "../lib/outbox";
 import { useMessageOutbox } from "../lib/useMessageOutbox";
+import { useVoiceComposer } from "../lib/useVoiceComposer";
+import { withTimeout } from "../lib/callLifecycle";
 import {
   compressImage,
   formatDurationMs,
   objectUrlFor,
   putStorageFile,
-  startRecording,
   type VoiceRecording,
 } from "../lib/media";
 import type { ChatMessage, MessageKind, ReplyQuote, SearchHit } from "../lib/types";
@@ -78,6 +79,7 @@ export function Chat({
   onBack,
   onCallVideo,
   onCallAudio,
+  callActive = false,
 }: {
   token: string;
   meColor: string;
@@ -90,6 +92,7 @@ export function Chat({
   onBack: () => void;
   onCallVideo: () => void;
   onCallAudio: () => void;
+  callActive?: boolean;
 }) {
   // ---- queries (soft: a backend that can't answer these must never throw
   // through useQuery and crash the chat onto the error panel — missing data
@@ -157,12 +160,7 @@ export function Chat({
   const [mediaBusy, setMediaBusy] = useState(false);
   const mediaBusyRef = useRef(false);
   const mediaAttempts = useRef(new WeakMap<Blob, { clientId: string; storageId?: string }>());
-  const [voicePending, setVoicePending] = useState<VoiceRecording | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [voicePhase, setVoicePhase] = useState<"idle" | "recording" | "sending" | "retry">("idle");
-  const [voiceMs, setVoiceMs] = useState(0);
-  const voiceHandleRef = useRef<{ stop: () => Promise<VoiceRecording>; cancel: () => void } | null>(null);
-  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   const isGroup = kind === "group";
   const anchored = jumpAnchor != null && anchoredRows != null;
@@ -184,10 +182,6 @@ export function Chat({
       return null;
     });
     setMediaBusy(false);
-    voiceHandleRef.current?.cancel();
-    voiceHandleRef.current = null;
-    setVoicePhase("idle");
-    setVoiceMs(0);
   }, [conversationId, token]);
 
   const membersById = useMemo(() => {
@@ -419,7 +413,7 @@ export function Chat({
     try {
       if (editing) {
         try {
-          await editMut({ messageId: editing, body: text, token });
+          await withTimeout(editMut({ messageId: editing, body: text, token }), 15_000, "edit_timeout");
         } catch {
           showError("ویرایش ذخیره نشد — دوباره تلاش کن");
           return;
@@ -475,11 +469,11 @@ export function Chat({
         const attempt = mediaAttempts.current.get(args.blob) ?? { clientId: newClientMsgId() };
         mediaAttempts.current.set(args.blob, attempt);
         if (!attempt.storageId) {
-          const up = await uploadUrlMut({ token });
+          const up = await withTimeout(uploadUrlMut({ token }), 15_000, "upload_authorization_timeout");
           attempt.storageId = await putStorageFile(up, args.blob, token);
         }
         const storageId = attempt.storageId;
-        await send({
+        await withTimeout(send({
           conversationId,
           token,
           kind: args.kind,
@@ -489,7 +483,7 @@ export function Chat({
           durationMs: args.durationMs,
           clientMessageId: attempt.clientId,
           replyToId: replying?.id,
-        });
+        }), 15_000, "send_media_timeout");
         return true;
       } catch {
         showError(args.kind === "image" ? "ارسال عکس نشد — دوباره تلاش کن" : "ارسال پیام صوتی نشد — دوباره تلاش کن");
@@ -535,12 +529,6 @@ export function Chat({
   };
 
   const sendVoice = async (rec: VoiceRecording) => {
-    // Under a second of audio is almost always a mis-tap.
-    if (rec.durationMs < 900) {
-      setVoiceError("ضبط خیلی کوتاه بود — دوباره امتحان کن");
-      window.setTimeout(() => setVoiceError(null), 3000);
-      return true; // consumed, nothing to send
-    }
     const ok = await uploadAndSend({ kind: "voice", blob: rec.blob, durationMs: rec.durationMs });
     if (ok) {
       setReplying(null);
@@ -551,68 +539,17 @@ export function Chat({
     return ok;
   };
 
-  // ---- voice note control (record → review → send) ----
-  const startVoice = useCallback(() => {
-    if (!VOICE_SUPPORTED || voicePhase !== "idle" || mediaBusy) return;
-    setVoiceMs(0);
-    setVoiceError(null);
-    try {
-      const handle = startRecording({
-        onTick: setVoiceMs,
-        onError: (msg) => {
-          voiceHandleRef.current = null;
-          setVoicePhase("idle");
-          setVoiceMs(0);
-          showError(msg);
-        },
-      });
-      voiceHandleRef.current = handle;
-      setVoicePhase("recording");
-    } catch {
-      setVoicePhase("idle");
-      showError("ضبط صدا ممکن نیست — میکروفون را بررسی کن");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voicePhase, mediaBusy, showError]);
-
-  const cancelVoice = useCallback(() => {
-    voiceHandleRef.current?.cancel();
-    voiceHandleRef.current = null;
-    setVoicePhase("idle");
-    setVoicePending(null);
-    setVoiceMs(0);
-  }, []);
-
-  const finishVoice = useCallback(async () => {
-    const handle = voiceHandleRef.current;
-    if (!handle && !voicePending) return;
-    if (mediaBusyRef.current || voicePhase === "sending") return;
-    setVoicePhase("sending");
-    try {
-      const rec = voicePending ?? await handle!.stop();
-      voiceHandleRef.current = null;
-      setVoicePending(rec);
-      const ok = await sendVoice(rec);
-      if (ok) { setVoicePending(null); setVoiceMs(0); setVoicePhase("idle"); }
-      else setVoicePhase("retry");
-    } catch {
-      voiceHandleRef.current = null;
-      setVoicePhase("idle");
-      setVoiceMs(0);
-      showError("ضبط کامل نشد — دوباره امتحان کن");
-    }
-  }, [sendVoice, showError, voicePending, voicePhase]);
-  useEffect(() => {
-    if (voicePhase === "recording" && voiceMs >= 290_000) void finishVoice();
-  }, [finishVoice, voiceMs, voicePhase]);
-
-  // If the user leaves mid-recording (e.g. call overlay takes over), stop.
-  useEffect(() => {
-    return () => {
-      voiceHandleRef.current?.cancel();
-      voiceHandleRef.current = null;
-    };
-  }, []);
+  const voice = useVoiceComposer({
+    scope: `${conversationId}:${token}`, blocked: callActive, busy: mediaBusy,
+    onSend: sendVoice, onError: showError,
+  });
+  const { phase: voicePhase, milliseconds: voiceMs, note: voiceError,
+    start: startVoice, cancel: cancelVoice, finish: finishVoice } = voice;
+  const beginCall = (kind: "audio" | "video") => {
+    voice.suspend();
+    for (const player of document.querySelectorAll<HTMLAudioElement>("audio[data-voice-note]")) player.pause();
+    if (kind === "video") onCallVideo(); else onCallAudio();
+  };
 
   // ---- toggles ----
   const toggleMute = () => {
@@ -677,7 +614,7 @@ export function Chat({
         {isGroup ? (
           <>
             <button
-              onClick={onCallAudio}
+              onClick={() => beginCall("audio")}
               className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sage-600 text-white shadow-md shadow-black/30 transition hover:bg-sage-500 active:scale-95"
               aria-label="تماس صوتی گروهی"
               title="تماس صوتی گروهی"
@@ -685,7 +622,7 @@ export function Chat({
               <Phone size={17} />
             </button>
             <button
-              onClick={onCallVideo}
+              onClick={() => beginCall("video")}
               className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-md shadow-black/30 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
               aria-label="تماس تصویری گروهی"
               title="تماس تصویری گروهی"
@@ -695,7 +632,7 @@ export function Chat({
           </>
         ) : (
           <button
-            onClick={onCallVideo}
+            onClick={() => beginCall("video")}
             className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-ember-400 text-cocoa shadow-md shadow-black/30 ring-1 ring-ember-300/40 transition hover:bg-ember-300 active:scale-95"
             aria-label="تماس تصویری"
             title="تماس تصویری"
@@ -784,9 +721,10 @@ export function Chat({
                       menu={menu}
                       setMenu={setMenu}
                       isGroup={isGroup}
+                      callActive={callActive}
                       onReact={(emoji) => {
                         setMenu(null);
-                        void react({ messageId: m._id, emoji, token }).catch(() => {});
+                        void withTimeout(react({ messageId: m._id, emoji, token }), 15_000, "reaction_timeout").catch(() => showError("واکنش ثبت نشد؛ دوباره تلاش کن."));
                       }}
                       onReply={() => handleReply(m)}
                       onEdit={() => {
@@ -798,7 +736,7 @@ export function Chat({
                         setMenu(null);
                       }}
                       onDelete={() => {
-                        if (m.isMine) delMut({ messageId: m._id, token });
+                        if (m.isMine) void withTimeout(delMut({ messageId: m._id, token }), 15_000, "delete_timeout").catch(() => showError("پیام حذف نشد؛ دوباره تلاش کن."));
                         setMenu(null);
                       }}
                       onJump={() => {
@@ -989,6 +927,7 @@ export function Chat({
               <button
                 type="button"
                 onClick={startVoice}
+                disabled={callActive || mediaBusy}
                 aria-label="ضبط پیام صوتی"
                 title="پیام صوتی"
                 className="grid h-12 w-11 shrink-0 place-items-center rounded-full text-dusk-600 transition hover:bg-dusk-200/80 active:scale-90"
@@ -1015,11 +954,11 @@ export function Chat({
               <span className="relative inline-flex h-3 w-3 rounded-full bg-rose-500" />
             </span>
             <span className="min-w-0 flex-1 truncate text-sm font-bold text-dusk-900">
-              {voicePhase === "sending" ? (
-                "در حال ارسال…"
+              {voicePhase === "sending" || voicePhase === "stopping" ? (
+                voicePhase === "stopping" ? "در حال آماده‌سازی…" : "در حال ارسال…"
               ) : (
                 <>
-                  {voicePhase === "retry" ? "ارسال نشد — تلاش دوباره یا حذف" : "در حال ضبط…"}
+                  {voicePhase === "retry" ? "آمادهٔ ارسال — ارسال یا حذف" : "در حال ضبط…"}
                   <span className="mx-1 font-black tabular-nums text-rose-300" dir="ltr">
                     {formatDurationMs(voiceMs)}
                   </span>
@@ -1040,6 +979,7 @@ export function Chat({
                 <button
                   type="button"
                   onClick={() => void finishVoice()}
+                  disabled={callActive}
                   aria-label="ارسال پیام صوتی"
                   title="ارسال"
                   className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sage-600 text-white shadow-md shadow-black/30 transition hover:bg-sage-500 active:scale-90"
@@ -1048,7 +988,7 @@ export function Chat({
                 </button>
               </>
             )}
-            {voicePhase === "sending" && (
+            {(voicePhase === "sending" || voicePhase === "stopping") && (
               <RefreshCw size={18} className="animate-spin text-ember-300" aria-label="در حال ارسال" />
             )}
           </div>
@@ -1241,6 +1181,7 @@ function Bubble({
   onReply,
   onEdit,
   onDelete,
+  callActive,
   onJump,
   onOpenImage,
 }: {
@@ -1254,6 +1195,7 @@ function Bubble({
   onReply: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  callActive: boolean;
   onJump: () => void;
   onOpenImage: (m: ChatMessage) => void;
 }) {
@@ -1320,7 +1262,7 @@ function Bubble({
             </>
           ) : kind === "voice" ? (
             msg.url ? (
-              <VoiceNoteBubble url={msg.url} durationMs={msg.durationMs} mine={mine} />
+              <VoiceNoteBubble url={msg.url} durationMs={msg.durationMs} mine={mine} disabled={callActive} />
             ) : (
               <span className="flex items-center gap-2 py-1 text-sm opacity-80">
                 <Clock size={13} /> در حال بارگذاری…

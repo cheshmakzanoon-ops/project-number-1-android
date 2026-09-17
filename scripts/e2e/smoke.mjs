@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { observeBrowser } from './diagnostics.mjs';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -16,6 +17,7 @@ const pages=[];const contexts=[];const pageErrors=[];
 async function context() {
   const ctx=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:430,height:900},permissions:['camera','microphone','clipboard-read','clipboard-write'],reducedMotion:'reduce'});
   contexts.push(ctx);const page=await ctx.newPage();pages.push(page);
+  observeBrowser(page, pages.length);
   page.on('pageerror',e=>pageErrors.push(e.message));
   // No account data or token-bearing request URLs are logged.
   page.setDefaultTimeout(20000);return page;
