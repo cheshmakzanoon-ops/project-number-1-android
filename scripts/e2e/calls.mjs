@@ -1,5 +1,6 @@
 // Real isolated media acceptance, independent of attachment-hosting checks.
 import assert from 'node:assert/strict';
+import {groupCall} from './family-features.mjs';
 import {createRequire} from 'node:module';
 import {resolve} from 'node:path';
 import {lookup} from 'node:dns/promises';
@@ -75,6 +76,7 @@ try{
   await first.getByRole('button',{name:'قطع کردن',exact:true}).waitFor({state:'hidden'});
   await first.getByRole('button',{name:'تماس تصویری',exact:true}).waitFor();
  });
+ await groupCall({first,second,device,check,media,frames,until});
  await check('No uncaught browser errors',async()=>{assert.deepEqual(errors,[]);});
 }catch(e){console.error(String(e).slice(0,2000));process.exitCode=1;
  for(let i=0;i<pages.length;i++){await pages[i].screenshot({path:`e2e-results/call-failure-${i}.png`,fullPage:true}).catch(()=>{});writeFileSync(`e2e-results/call-page-${i}.txt`,await pages[i].locator('body').innerText().catch(()=>''));}

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {messagingFeatures} from './family-features.mjs';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -112,6 +113,7 @@ try {
     assert.equal(await child.getByRole('button',{name:'ورود به گرما',exact:true}).count(),0);
     await child.context().setOffline(false);
   });
+  await messagingFeatures({child,dad,context,register,send,check,until});
   await check('No uncaught page errors',async()=>{assert.deepEqual(pageErrors,[]);});
   await child.screenshot({path:'e2e-results/child.png',fullPage:true});await dad.screenshot({path:'e2e-results/dad.png',fullPage:true});
 } catch(error) {
