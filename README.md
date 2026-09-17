@@ -1,88 +1,99 @@
 # گرما — Family Messenger
 
-Private Persian messaging + calling app for families (name-only signup, no
-email/phone). Built with React + Vite + Convex (backend/database) + LiveKit
-(calls) + Web Push (ringing while closed).
+Persian-first family messaging and calling, with name-only registration, a React
+progressive web app, a Convex backend, LiveKit audio/video rooms, Web Push, and
+an Android screen-sharing companion.
 
-## Stack & layout
+**Release status: not approved for unattended family use.** The repository
+repairs are tested, but the matching backend/frontend deployment and actual
+phones must also pass acceptance. Read [the current release report](docs/release-status.md)
+before sending an installation link to family. Name-only registration is open
+self-enrollment, not an invitation-only family boundary.
 
-- `src/` — React frontend (Vite, Tailwind v4, TypeScript)
-- `src/convex/` — Convex backend: schema, queries, mutations, actions
-  (LiveKit token minting + Web Push run in Node via `"use node"` files)
-- `public/` — PWA shell: `sw.js` (network-first cache + incoming-call push),
-  manifest, icons
+## Project layout
 
-## Convex backend
+| Path | Responsibility |
+| --- | --- |
+| `src/components/` | Conversations, voice messages, statuses and call interface |
+| `src/lib/` | Call lifecycle, media ownership, durable text outbox and device support |
+| `src/convex/` | Server-side authorization, data, calls, storage and push actions |
+| `public/` | PWA manifest, service worker and notification actions |
+| `android/` | Native screen capture published into the same LiveKit room |
+| `.github/workflows/` | Web/native verification, live readiness and guarded backend deployment |
 
-The app talks to one Convex Cloud deployment, hard-coded in `src/main.tsx`
-(`resolveConvexUrl`). There is no `.env` indirection for the backend URL, on
-purpose: a build-environment default can never silently redirect the app to a
-wrong backend.
+The Android module is **only the screen-sharing companion**. It does not contain
+the chat or calling interface. Read [its build and capture instructions](android/README.md).
 
-Convex env vars used by actions (LiveKit + Web Push) live in the deployment's
-env (never in git):
-
-- `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` — video/audio calls
-- `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` — push ringing for incoming calls
-
-## Running
+## Run and verify
 
 ```sh
-bun install
-bun convex dev --once     # regenerate _generated + typecheck backend
-bun run dev              # frontend dev server
-bun tsc -b --noEmit      # typecheck
-bun run build            # production build (tsc + vite build -> dist/)
+bun install --frozen-lockfile
+bun run dev
+bun run test:call-video
+bun run typecheck
+bun run build
 ```
 
-## Deploying
+Despite its historical name, `test:call-video` runs the entire web/backend
+regression suite. The reliability repair includes 144 tests covering call
+rendering/lifecycle, microphone cleanup, uploads, message retries, multi-tab
+queue isolation, notification actions, read receipts, shared-media deletion,
+and server-side authorization. Tests involving LiveKit/browser APIs use mocks;
+they are not evidence of a real call between two phones.
 
-The frontend is a static Vite build (`dist/`) served by the host platform.
-The Convex backend must be pushed to the same Convex Cloud deployment the
-frontend points at — if the two drift, screens that call missing functions
-show empty/error states instead of content. After changing anything in
-`src/convex/`, push the backend to the cloud deployment before shipping the
-frontend build.
+Production output is `dist/`. `Verify family messenger` installs the committed
+lockfile, runs tests, checks TypeScript and builds the frontend. Its short-lived
+artifacts contain the tested source, JUnit report and build output, not secrets
+or production user data.
 
-## Call video verification
+## One backend, separate deployment steps
 
-Remote video is delivered as SDK `RemoteVideoTrack` objects and attached per
-video element (`src/components/RemoteVideoFeed.tsx`); the tests below guard
-that path (subscription → snapshot → layout → element → displayed frame).
+The canonical Convex deployment is hard-coded in `src/main.tsx` and the Android
+BuildConfig. Do not silently replace it with a new backend: that would separate
+existing accounts, conversations and call state. A development preview's local
+proxy is not a production endpoint.
 
-- Run the suite:
+Server-only environment variables belong in Convex, never frontend source:
 
-  ```sh
-  bun run test:call-video
-  bun run typecheck
-  bun run build
-  ```
+- `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+- `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`
 
-- Diagnostics: set `VITE_CALL_VIDEO_DEBUG=1` for opt-in markers only — the
-  hook logs connection/subscription stages (`[call-video] roomConnected`,
-  `remoteVideoSubscribed`) and RemoteVideoFeed logs ≤1/s receiver-stat samples
-  (bytesReceived, framesReceived/framesDecoded, frameWidth/Height,
-  attachedElements, play state). Default operation logs no call telemetry.
+A GitHub push does **not** by itself update Convex or the frontend host.
 
-- Rendering evidence lives on the remote `<video>` element: `data-call-video`
-  = `remote-camera` | `remote-screen`, `data-call-video-play` =
-  waiting/playing/failed, `data-call-video-frame` = none/rvfc/fallback. A room
-  connection or a fulfilled `play()` promise is **not** a displayed frame —
-  only the frame marker (or visible motion) proves decoding.
+1. Store a deployment key for the existing canonical backend in the repository's
+   GitHub Actions secret `CONVEX_DEPLOY_KEY`.
+2. Manually run `Deploy verified backend` from `main`. It runs the regression
+   gates and verifies the resolved backend URL before pushing any functions or
+   schema changes. A key for a different deployment is refused.
+3. Run `Check deployed backend`. It performs read-only checks, creates no users
+   or calls, and archives no returned directory data. Its last recorded live
+   directory-privacy check failed; see the release report.
+4. Deploy the matching `dist/` to the actual HTTPS frontend host. No verified
+   hosting account or public frontend URL is recorded in this repository.
+5. Distribute a properly signed Android companion through a verified route and
+   execute [the two-device acceptance checklist](docs/call-manual-acceptance.md).
 
-- Manual receiving tests (two independent devices/accounts against a real
-  LiveKit deployment; this patch is receiving-side only — Android capture is
-  a separate step):
-  1. A↔B video call with cameras on: moving local preview and moving remote
-     image on both ends; with `VITE_CALL_VIDEO_DEBUG=1`, take two successive
-     receiver-stat samples showing increasing decoded frames while motion is
-     visible.
-  2. Desktop sender shares a changing screen: verify reception, stop sharing,
-     and confirm the camera picture resumes with no stale shared content.
-  3. Three-person call (grid), camera mute/unmute on a participant,
-     minimize/restore of the call overlay, and repeated layout switches.
+The storage repair adds `by_storage` indexes without changing existing document
+fields. The new read-receipt `throughId` argument is optional for older clients.
+Backend changes must be deployed before the matching new frontend. Checked-in
+static `_generated` declarations have been synchronized; the authorized Convex
+CLI should regenerate them during deployment rather than treating hand-edited
+declarations as proof of a live schema.
 
-- Not executed here: real two-identity device/browser calls, screenshare
-  reception, and relay/decoder verification require deployed LiveKit
-  credentials and hardware not available in this workspace; those checks are
-  listed above for a device pass.
+## Call video evidence
+
+`RemoteVideoFeed.tsx` attaches SDK `RemoteVideoTrack` objects to actual video
+elements. With `VITE_CALL_VIDEO_DEBUG=1`, opt-in logs show connection/subscription
+stages and limited receiver statistics. Normal operation does not enable this
+telemetry.
+
+Remote video elements expose `data-call-video`, `data-call-video-play`, and
+`data-call-video-frame`. A room connection or successful `play()` promise is not
+proof of a displayed frame. Verify moving images and audible two-way audio on
+independent devices, then camera switching, mute, hangup/redial, screen-share
+stop/restart, notification actions and network changes.
+
+Full-screen takeover and reliable ringing while locked/closed depend on the
+browser and operating system. A PWA cannot promise native telephone behavior.
+Keep another established way to contact family until the deployed build passes
+on their actual phones and networks.
