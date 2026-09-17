@@ -35,12 +35,20 @@ zero lint errors and three version/target advisories per variant. Vite also
 reports a non-blocking size advisory for the lazy media SDK chunk. These warnings
 have not been hidden or described as zero-warning output.
 
-The final follow-up adds two regression cases protecting the legacy test entry
-point from live-deployment writes: **346 tests pass locally**, with TypeScript
-and production build. It also adds a real-browser offline-installation-guide
-scenario. The current commit's four GitHub checks must pass before selecting
-that commit for release; do not apply the baseline's result to modified code
-without rerunning the checks.
+At follow-up commit `aa38eaea8d01ca246599ced63c2a8fe592bc4ff9`, all four
+code checks passed, including the offline-guide scenario and 346 unit/regression
+tests. This continuation adds 50 tests for the deployment configuration and
+read-only release probe: **396 tests pass locally**, along with TypeScript and
+the production build. Current-commit CI must still pass before release selection.
+
+The release probe now checks the source API version, private-invitation setup,
+exact upload origins, upload route behavior and a cryptographically matching
+Web Push key pair, not merely the presence of a public key. Malformed origin
+entries fail closed at the upload handler as well as in the readiness check.
+The actual Node configuration action is also exercised on the disposable backend.
+`Deploy verified backend` runs the read-only checks after deploying; a function
+upload alone no longer counts as a successful release. The independent manual
+check needs only the frontend origin, never a deployment key or device token.
 
 ## What the family scenarios exercise
 

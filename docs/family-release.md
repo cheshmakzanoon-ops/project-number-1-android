@@ -46,11 +46,27 @@ Store a deploy key for this exact Convex deployment as repository Actions secret
 installs the locked dependencies, checks tests/types/build, and verifies the
 resolved deployment URL before pushing functions or schema.
 
-After backend deployment, run **Check deployed backend**. All its checks must
-pass. It does not create accounts/calls, and it does not prove push delivery,
-all operator settings, or real media transport. A missing/failed function is
-not a successful privacy check. Never relax an authorization test merely to
-obtain a green result.
+Set the repository Actions **variable** `GARMA_FRONTEND_ORIGIN` to the exact
+HTTPS frontend origin (no path, credentials, query or fragment); alternatively
+supply the `frontend_origin` workflow input. It is not a secret. The deployment
+workflow checks this input before publishing and runs the read-only release
+checks after the backend deploy completes. A successful function upload alone
+no longer produces a successful deployment workflow.
+
+**Check deployed backend** can also be run separately on `main`. All 14 checks
+must pass: source API compatibility, private-invitation configuration, exact
+HTTPS origin allowlisting, HTTPS upload site, secure LiveKit configuration,
+matching P-256 Web Push keys, unauthenticated identity/directory denial, actual
+upload preflight, and rejection of unauthenticated/opaque-origin uploads. It
+neither creates user data nor reads admin/device credentials. Only booleans,
+status codes and fixed diagnostic labels enter `backend-readiness.json`.
+
+These checks do not prove frontend publication, LiveKit credential acceptance,
+media/push delivery or physical-device behavior. A missing endpoint, timeout,
+malformed response or stale API version fails; none counts as permission denial.
+A failed post-deployment check does not roll the backend back automatically.
+Correct its configuration or follow the compatible rollback procedure below;
+do not announce a family release while it remains red.
 
 Build the same commit with `bun run build`, then deploy **the whole `dist/`**
 to the actual HTTPS frontend host. Serve it from the origin root, not under a

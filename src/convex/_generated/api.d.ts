@@ -20,6 +20,14 @@ import type { GenericId as Id } from "convex/values";
  * ```
  */
 export declare const api: {
+  deployment: {
+    readiness: FunctionReference<"action", "public", { frontendOrigin: string }, {
+      apiVersion: string;
+      ready: boolean;
+      checks: { privateEnrollment: boolean; uploadSite: boolean; allowedOrigins: boolean;
+        frontendOrigin: boolean; livekit: boolean; pushKeys: boolean };
+    }>;
+  };
   auth: {
     authQuery: FunctionReference<
       "query",

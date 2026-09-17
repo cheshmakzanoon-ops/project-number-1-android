@@ -2,6 +2,11 @@ name: Deploy verified backend
 
 on:
   workflow_dispatch:
+    inputs:
+      frontend_origin:
+        description: 'Exact HTTPS frontend origin; defaults to repository variable GARMA_FRONTEND_ORIGIN'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,11 +20,25 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      GARMA_FRONTEND_ORIGIN: ${{ inputs.frontend_origin || vars.GARMA_FRONTEND_ORIGIN }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Require an explicit frontend origin before deploying
+        run: |
+          node --input-type=module <<'JS'
+          import { frontendOrigin } from './scripts/check-backend-readiness.mjs';
+          if (!frontendOrigin(process.env.GARMA_FRONTEND_ORIGIN)) {
+            console.error('Set GARMA_FRONTEND_ORIGIN to the exact HTTPS frontend origin or supply the workflow input.');
+            process.exitCode = 1;
+          }
+          JS
       - name: Check deployment authorization
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
@@ -36,3 +55,13 @@ jobs:
         env:
           CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
         run: bunx convex deploy --yes --typecheck enable --cmd 'node scripts/check-deploy-target.mjs' --cmd-url-env-var-name GARMA_DEPLOY_URL
+      - name: Require the deployed backend to pass the family release checks
+        run: node scripts/check-backend-readiness.mjs
+      - name: Save sanitized post-deployment verification
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployed-backend-readiness-${{ github.sha }}-${{ github.run_attempt }}
+          path: backend-readiness.json
+          retention-days: 7
+          if-no-files-found: warn

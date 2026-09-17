@@ -1,7 +1,7 @@
 import { httpRouter } from "convex/server";
-import { env, httpAction } from "./_generated/server";
+import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { MAX_MEDIA_BYTES } from "./policy";
+import { MAX_MEDIA_BYTES, allowedOrigin } from "./policy";
 import type { Id } from "./_generated/dataModel";
 
 /** Validate bytes, not just attacker-controlled MIME labels. No HTML/SVG uploads. */
@@ -20,17 +20,7 @@ export function mediaSignatureMatches(bytes: Uint8Array, mime: string): boolean 
   }
 }
 
-export function allowedOrigin(origin: string | null): boolean {
-  if (!origin) return false;
-  const allowed = (env as unknown as Record<string, string | undefined>).GARMA_ALLOWED_ORIGINS ?? "";
-  return allowed.split(",").some(value => {
-    try {
-      const url = new URL(value.trim());
-      return url.origin === origin && (url.protocol === "https:" ||
-        (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname)));
-    } catch { return false; }
-  });
-}
+export { allowedOrigin } from "./policy";
 
 /** Hard byte bound also applies when Content-Length is absent or dishonest. */
 export async function readBoundedBody(request: Request): Promise<Uint8Array<ArrayBuffer>> {

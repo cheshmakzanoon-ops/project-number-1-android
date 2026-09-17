@@ -16,3 +16,4 @@ android/.gradle/
 android/**/build/
 family-package/
 e2e-results/
+backend-readiness.json

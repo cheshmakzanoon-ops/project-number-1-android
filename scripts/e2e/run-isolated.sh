@@ -56,6 +56,16 @@ LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 ENV
 chmod 600 "$RUNNER_TEMP/garma-test-env"
+# Disposable pair only; configuration checks must validate real P-256 keys.
+node --input-type=module <<'JS'
+import { createECDH } from 'node:crypto';
+import { appendFileSync } from 'node:fs';
+const pair = createECDH('prime256v1'); pair.generateKeys();
+const privateKey = pair.getPrivateKey().toString('hex').padStart(64, '0');
+appendFileSync(process.env.RUNNER_TEMP + '/garma-test-env',
+  'VAPID_PUBLIC_KEY=' + pair.getPublicKey().toString('base64url') + '\n' +
+  'VAPID_PRIVATE_KEY=' + Buffer.from(privateKey, 'hex').toString('base64url') + '\n');
+JS
 bunx convex env set --from-file "$RUNNER_TEMP/garma-test-env"
 bunx convex deploy --yes --typecheck enable --codegen enable
 if [[ "$E2E_SUITE" == "calls" ]]; then node scripts/e2e/check-runtime.mjs; fi

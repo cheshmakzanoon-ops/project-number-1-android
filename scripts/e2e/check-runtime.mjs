@@ -17,3 +17,24 @@ for (const [name, code] of [['validation', 'invalid'], ['internal callback', 'A'
   console.log(JSON.stringify(result));
   assert.ok(result.passed, 'The isolated Node action runtime and its database callback must execute before browser tests');
 }
+
+// The deployed Node action, not a mocked configuration helper. This request
+// cannot create family identities or expose the generated test keys.
+const response = await fetch('http://127.0.0.1:3210/api/action', {
+  method: 'POST', signal: AbortSignal.timeout(20000), headers: {'Content-Type':'application/json'},
+  body: JSON.stringify({path:'deployment:readiness',args:{frontendOrigin:'https://garma-ci.test'},format:'json'}),
+});
+const readiness = await response.json();
+const expectedVersion = (await import('node:fs')).readFileSync('src/convex/policy.ts','utf8')
+  .match(/export const API_VERSION = "([^"\s]+)";/)?.[1];
+assert.ok(expectedVersion);
+assert.equal(response.status,200);
+assert.equal(readiness.status,'success');
+assert.equal(readiness.value.apiVersion,expectedVersion);
+assert.equal(readiness.value.ready,true);
+assert.deepEqual(readiness.value.checks,{privateEnrollment:true,uploadSite:true,allowedOrigins:true,frontendOrigin:true,livekit:true,pushKeys:true});
+writeFileSync('e2e-results/deployment-configuration.json',JSON.stringify({
+  commit:process.env.GITHUB_SHA, passed:true, apiVersion:expectedVersion,
+  checks:readiness.value.checks, scope:'Isolated configuration validation; no push delivery claim.',
+},null,2));
+console.log('PASS: deployed private-family configuration action');

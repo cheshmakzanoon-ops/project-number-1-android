@@ -4,7 +4,7 @@ import type { Id } from "./_generated/dataModel";
 
 export const MAX_FAMILY_USERS = 100;
 export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
-export const API_VERSION = "2026-09-17.2";
+export const API_VERSION = "2026-09-17.3";
 
 /** Configuration has no permissive production default. Existing sessions survive. */
 export function familyInviteCode(): string {
@@ -42,4 +42,29 @@ export function mediaEndpoint(): string {
   const url = new URL(site);
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("upload_not_configured");
   return url.origin + "/media/upload";
+}
+
+/** Parse an origin, not a URL whose credentials/path get silently discarded. */
+export function webOrigin(value: string, allowLoopback = false): string | null {
+  if (!value || value !== value.trim() || /[\\\s]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.search || url.hash || url.pathname !== "/") return null;
+    if (url.protocol !== "https:" && !(allowLoopback && url.protocol === "http:" &&
+      ["localhost", "127.0.0.1"].includes(url.hostname))) return null;
+    return url.origin;
+  } catch { return null; }
+}
+
+/** One malformed entry makes the configuration invalid rather than broadening access. */
+export function configuredWebOrigins(): string[] {
+  const raw = (env as unknown as Record<string, string | undefined>).GARMA_ALLOWED_ORIGINS;
+  if (!raw?.trim() || raw.length > 8192) return [];
+  const origins = raw.split(",").map(value => webOrigin(value.trim(), true));
+  if (origins.some(origin => origin === null)) return [];
+  return [...new Set(origins as string[])];
+}
+
+export function allowedOrigin(origin: string | null): boolean {
+  return origin !== null && configuredWebOrigins().includes(origin);
 }
