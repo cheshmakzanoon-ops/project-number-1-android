@@ -45,11 +45,6 @@ const server = https.createServer({key:readFileSync(join(dir,'key.pem')),cert:re
     if(!/^\s/.test(line)) { const pattern=line.trim();applies=pattern.endsWith('*') ? pathname.startsWith(pattern.slice(0,-1)) : pathname===pattern; }
     else if(applies) { const parts=line.trim().match(/^([^:]+):\s*(.*)$/);if(parts) headers[parts[1]]=parts[2]; }
   }
-  // Disposable backend storage URLs use its standard HTTP loopback origin.
-  // Permit only that test origin for media in this test host; never modify the
-  // production _headers artifact or disable the browser's CSP enforcement.
-  const csp = headers['Content-Security-Policy'];
-  if (csp) headers['Content-Security-Policy'] = csp.replace(/\b(img-src|media-src)\s/g, '$1 http://127.0.0.1:3210 ');
   res.writeHead(200,headers);res.end(readFileSync(file));
 });
 server.on('upgrade',(req,socket,head)=>{

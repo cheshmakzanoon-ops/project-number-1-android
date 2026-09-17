@@ -4,6 +4,12 @@ set -euo pipefail
 if [[ "${CI:-}" != "true" || -z "${RUNNER_TEMP:-}" ]]; then
   echo 'Use the isolated GitHub Actions job on a disposable runner.' >&2; exit 1
 fi
+# Separate suites preserve strict production CSP rather than adding loopback
+# exceptions to HTML or headers. Each matrix job gets a fresh disposable server.
+case "${E2E_SUITE:-}" in
+  messaging|calls) ;;
+  *) echo 'E2E_SUITE must be messaging or calls' >&2; exit 1 ;;
+esac
 export E2E_TOOLS="$RUNNER_TEMP/garma-browser-tools"
 export CONVEX_SELF_HOSTED_URL='http://127.0.0.1:3210'
 unset CONVEX_DEPLOY_KEY CONVEX_DEPLOYMENT CONVEX_SELF_HOSTED_ADMIN_KEY
@@ -26,10 +32,13 @@ IMAGE='ghcr.io/get-convex/convex-backend:latest'
 docker pull "$IMAGE"
 IMAGE="$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')"
 printf '%s\n' "$IMAGE" | tee e2e-results/backend-image.txt
-# The Node executor calls back inside its own container, using the standard
-# self-hosted localhost origin. Production deployment configuration is untouched.
+# Messaging tests exercise HTTPS storage with the shipped CSP unchanged.
+# Call tests exercise Node actions with their normal in-container callback URL;
+# they do not load uploaded attachments. Neither mode points clients at prod.
+BACKEND_ORIGIN="https://$CLOUD_HOST"
+if [[ "$E2E_SUITE" == "calls" ]]; then BACKEND_ORIGIN='http://127.0.0.1:3210'; fi
 docker run -d --name garma-ci-convex -p 127.0.0.1:3210:3210 -p 127.0.0.1:3211:3211 \
-  -e CONVEX_CLOUD_ORIGIN="http://127.0.0.1:3210" -e CONVEX_SITE_ORIGIN="https://$SITE_HOST" \
+  -e CONVEX_CLOUD_ORIGIN="$BACKEND_ORIGIN" -e CONVEX_SITE_ORIGIN="https://$SITE_HOST" \
   -e DISABLE_BEACON=true -e DISABLE_METRICS_ENDPOINT=true "$IMAGE"
 for i in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:3210/version > e2e-results/backend-version.txt; then break; fi
@@ -49,7 +58,7 @@ ENV
 chmod 600 "$RUNNER_TEMP/garma-test-env"
 bunx convex env set --from-file "$RUNNER_TEMP/garma-test-env"
 bunx convex deploy --yes --typecheck enable --codegen enable
-node scripts/e2e/check-runtime.mjs
+if [[ "$E2E_SUITE" == "calls" ]]; then node scripts/e2e/check-runtime.mjs; fi
 bun run build
 npm install --prefix "$E2E_TOOLS" --ignore-scripts --no-audit --no-fund playwright@1.63.0
 node "$E2E_TOOLS/node_modules/playwright/cli.js" install --with-deps chromium
@@ -68,9 +77,8 @@ for i in $(seq 1 30); do
   sleep 1
 done
 curl -kfsS https://garma-ci.test/ >/dev/null
-# Keep independent acceptance reports: an attachment-hosting failure must not
-# prevent exercising calls, but any failed suite still fails the workflow.
-RESULT=0
-node scripts/e2e/calls.mjs || RESULT=1
-node scripts/e2e/smoke.mjs || RESULT=1
-exit "$RESULT"
+if [[ "$E2E_SUITE" == "calls" ]]; then
+  node scripts/e2e/calls.mjs
+else
+  node scripts/e2e/smoke.mjs
+fi

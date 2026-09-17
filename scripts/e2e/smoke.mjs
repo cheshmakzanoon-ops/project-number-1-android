@@ -8,7 +8,7 @@ const require=createRequire(resolve(process.env.E2E_TOOLS ?? '.', 'package.json'
 const {chromium}=require('playwright');
 const ORIGIN='https://garma-ci.test';
 const INVITE='garma-isolated-browser-test-invitation-2026';
-const report={scope:'Production bundle with real isolated Convex and LiveKit; synthetic browser camera/microphone; test host permits media from the disposable backend on HTTP loopback; no production deployment or physical phones.',commit:process.env.GITHUB_SHA,checks:[]};
+const report={scope:'Production bundle and content-security policy with real isolated Convex HTTPS storage; synthetic voice recording; calls are verified separately with real LiveKit; no production deployment or physical phones.',commit:process.env.GITHUB_SHA,checks:[]};
 mkdirSync('e2e-results',{recursive:true});
 const hosts=['garma-ci.test','garma-ci-media.test','precise-ptarmigan-412.eu-west-1.convex.cloud','precise-ptarmigan-412.eu-west-1.convex.site'];
 for(const host of hosts) assert.equal((await lookup(host)).address,'127.0.0.1','Refuse to contact non-loopback infrastructure');
@@ -50,17 +50,6 @@ async function send(page,text) {
   await page.getByPlaceholder('پیام خود را بنویسید…').fill(text);
   await page.getByRole('button',{name:'ارسال',exact:true}).click();
   await page.getByText(text,{exact:true}).first().waitFor();
-}
-async function movingVideo(page) {
-  const selector='video[data-call-video="remote-camera"]';
-  await page.locator(selector).first().waitFor();
-  return await until(async()=>{
-    const first=await page.locator(selector).first().evaluate(v=>({width:v.videoWidth,height:v.videoHeight,frames:v.getVideoPlaybackQuality().totalVideoFrames,time:v.currentTime,ready:v.readyState}));
-    if(first.width===0||first.frames===0) return false;
-    await new Promise(r=>setTimeout(r,800));
-    const second=await page.locator(selector).first().evaluate(v=>({frames:v.getVideoPlaybackQuality().totalVideoFrames,time:v.currentTime}));
-    return second.frames>first.frames&&second.time>first.time ? {...first,laterFrames:second.frames} : false;
-  },'decoded remote video frames progressing',45000);
 }
 const child=await context(),dad=await context();
 try {
@@ -106,24 +95,6 @@ try {
     await dad.locator('audio').last().waitFor({state:'attached'});
     const duration=await dad.locator('audio').last().evaluate(async a=>{await a.play();await new Promise(r=>setTimeout(r,400));const time=a.currentTime;a.pause();return time;});
     assert.ok(duration>0,'actual media playback time must advance');return {playbackSeconds:duration};
-  });
-  await check('Real LiveKit video call carries advancing remote frames in both directions',async()=>{
-    await child.getByRole('button',{name:'تماس تصویری',exact:true}).click();
-    await dad.getByRole('button',{name:'پاسخ',exact:true}).click();
-    const [atChild,atDad]=await Promise.all([movingVideo(child),movingVideo(dad)]);
-    return {atChild,atDad};
-  });
-  await check('Microphone and camera controls, hangup and redial use real media rooms',async()=>{
-    await child.getByRole('button',{name:'سکوت',exact:true}).click();await child.getByRole('button',{name:'صدا',exact:true}).waitFor();
-    await child.getByRole('button',{name:'صدا',exact:true}).click();
-    await child.getByRole('button',{name:'خاموش',exact:true}).click();await child.getByRole('button',{name:'دوربین',exact:true}).click();
-    await movingVideo(dad);
-    await child.getByRole('button',{name:'پایان تماس',exact:true}).click();
-    await dad.getByRole('button',{name:'پایان تماس',exact:true}).waitFor({state:'hidden'});
-    await child.getByRole('button',{name:'تماس تصویری',exact:true}).click();
-    await dad.getByRole('button',{name:'پاسخ',exact:true}).click();await movingVideo(child);
-    await dad.getByRole('button',{name:'پایان تماس',exact:true}).click();
-    await child.getByRole('button',{name:'پایان تماس',exact:true}).waitFor({state:'hidden'});
   });
   await check('Offline outgoing text remains visible and reaches its peer after reconnect',async()=>{
     await child.context().setOffline(true);await send(child,'CI queued offline');

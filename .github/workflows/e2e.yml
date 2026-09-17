@@ -12,8 +12,13 @@ concurrency:
   cancel-in-progress: true
 jobs:
   browser:
+    name: browser (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [messaging, calls]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,12 +31,14 @@ jobs:
           bun-version: '1.4.2'
       - run: bun install --frozen-lockfile
       - name: Exercise built app with disposable real servers
+        env:
+          E2E_SUITE: ${{ matrix.suite }}
         run: bash scripts/e2e/run-isolated.sh
       - name: Save synthetic-only browser evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: browser-integration-${{ github.sha }}
+          name: browser-${{ matrix.suite }}-${{ github.sha }}
           path: |
             e2e-results/
             src/convex/_generated/
