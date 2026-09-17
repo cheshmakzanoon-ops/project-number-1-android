@@ -26,7 +26,7 @@ beforeEach(() => {
 afterEach(cleanup);
 async function search(body: string, id: string) {
   state.hits = [{ _id: id, body, kind: "text", createdAt: Date.now(), senderName: "Dad", senderColor: "#777" }];
-  await act(async () => fireEvent.click(screen.getByRole("button", { name: "جستجو در گفتگو", exact: true })));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "جستجو در گفتگو" })));
   fireEvent.change(screen.getByPlaceholderText("جستجو در گفتگو…"), { target: { value: body } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: new RegExp(body) })));
 }
