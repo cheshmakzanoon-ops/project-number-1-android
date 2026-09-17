@@ -37,8 +37,10 @@ jobs:
           assert hashlib.sha256(patch).hexdigest() == 'f4db83cc331345afe93e9a47d8e192cab2fbc603c71af44f51595d3e85a80015', 'Patch integrity failure'
           (root / 'reviewed.patch').write_bytes(patch)
           PY
-          git apply --check --index "$RUNNER_TEMP/reviewed.patch"
-          git apply --index "$RUNNER_TEMP/reviewed.patch"
+          # Workflow changes use the separately authorized GitHub connection.
+          # The build token must not create, edit or remove workflow files.
+          git apply --check --index --exclude='.github/workflows/*' "$RUNNER_TEMP/reviewed.patch"
+          git apply --index --exclude='.github/workflows/*' "$RUNNER_TEMP/reviewed.patch"
           git diff --cached --check
       - uses: oven-sh/setup-bun@v2
       - name: Install locked web dependencies
@@ -79,14 +81,17 @@ jobs:
           require_cases(Path('android/app/build/test-results/testDebugUnitTest').glob('TEST-*.xml'), 5, 'Android')
           assert Path('android/app/build/outputs/apk/debug/app-debug.apk').is_file(), 'No APK generated'
           PY
-      - name: Commit verified changes and remove this one-time workflow
+      - name: Commit tested application files and push without force
         shell: bash
         run: |
           set -euo pipefail
-          git rm .github/workflows/apply-family-repair.yml
+          if git diff --cached --name-only | grep -q '^.github/workflows/'; then
+            echo 'Unexpected workflow edit in application-only commit'
+            exit 1
+          fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: preserve queued messages, read receipts, shared media and native capture lifecycle' -m 'Keep active call controls during backend recovery; isolate durable multi-tab outboxes; scope read receipts to displayed messages; preserve shared uploads until their last reference is removed. Bound Android capture authorization and cancel startup/cleanup safely. Verified 144 web/backend regressions, production types/build, and Android assemble/lint/unit tests before commit. Add a guarded manual backend deployment workflow; no production deployment or physical-device acceptance is implied.'
+          git commit -m 'fix: preserve queued messages, read receipts, shared media and native capture lifecycle' -m 'Keep active call controls during backend recovery; isolate durable multi-tab outboxes; scope read receipts to displayed messages; preserve shared uploads until their last reference is removed. Bound Android capture authorization and cancel startup/cleanup safely. Verified 144 web/backend regressions, production types/build, and five Android unit tests plus assemble/lint before commit. No production deployment or physical-device acceptance is implied.'
           git push origin HEAD:main
           git rev-parse HEAD > verified-commit.txt
           git archive --format=tar HEAD | gzip > source.tar.gz
