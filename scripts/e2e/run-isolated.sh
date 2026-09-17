@@ -26,8 +26,10 @@ IMAGE='ghcr.io/get-convex/convex-backend:latest'
 docker pull "$IMAGE"
 IMAGE="$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')"
 printf '%s\n' "$IMAGE" | tee e2e-results/backend-image.txt
+# The Node executor calls back inside its own container, using the standard
+# self-hosted localhost origin. Production deployment configuration is untouched.
 docker run -d --name garma-ci-convex -p 127.0.0.1:3210:3210 -p 127.0.0.1:3211:3211 \
-  -e CONVEX_CLOUD_ORIGIN="https://$CLOUD_HOST" -e CONVEX_SITE_ORIGIN="https://$SITE_HOST" \
+  -e CONVEX_CLOUD_ORIGIN="http://127.0.0.1:3210" -e CONVEX_SITE_ORIGIN="https://$SITE_HOST" \
   -e DISABLE_BEACON=true -e DISABLE_METRICS_ENDPOINT=true "$IMAGE"
 for i in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:3210/version > e2e-results/backend-version.txt; then break; fi

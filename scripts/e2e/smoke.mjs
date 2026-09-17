@@ -1,23 +1,24 @@
 import assert from 'node:assert/strict';
-import { observeBrowser } from './diagnostics.mjs';
 import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { lookup } from 'node:dns/promises';
+import { observeBrowser } from './diagnostics.mjs';
 const require=createRequire(resolve(process.env.E2E_TOOLS ?? '.', 'package.json'));
 const {chromium}=require('playwright');
 const ORIGIN='https://garma-ci.test';
 const INVITE='garma-isolated-browser-test-invitation-2026';
-const report={scope:'Production bundle with real isolated Convex and LiveKit; synthetic browser camera/microphone; no production deployment or physical phones.',commit:process.env.GITHUB_SHA,checks:[]};
+const report={scope:'Production bundle with real isolated Convex and LiveKit; synthetic browser camera/microphone; test host permits media from the disposable backend on HTTP loopback; no production deployment or physical phones.',commit:process.env.GITHUB_SHA,checks:[]};
 mkdirSync('e2e-results',{recursive:true});
 const hosts=['garma-ci.test','garma-ci-media.test','precise-ptarmigan-412.eu-west-1.convex.cloud','precise-ptarmigan-412.eu-west-1.convex.site'];
 for(const host of hosts) assert.equal((await lookup(host)).address,'127.0.0.1','Refuse to contact non-loopback infrastructure');
 const browser=await chromium.launch({headless:true,args:['--ignore-certificate-errors','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required']});
 const pages=[];const contexts=[];const pageErrors=[];
+const diagnostics=observeBrowser();
 async function context() {
   const ctx=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width:430,height:900},permissions:['camera','microphone','clipboard-read','clipboard-write'],reducedMotion:'reduce'});
   contexts.push(ctx);const page=await ctx.newPage();pages.push(page);
-  observeBrowser(page, pages.length);
+  diagnostics.attach(page,pages.length);
   page.on('pageerror',e=>pageErrors.push(e.message));
   // No account data or token-bearing request URLs are logged.
   page.setDefaultTimeout(20000);return page;
@@ -96,7 +97,7 @@ try {
     const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMCAIAAADZF8uwAAAAF0lEQVR4nGPUTdvDQAgwEVQxqmgAFAEAWIEBZ+DAdM0AAAAASUVORK5CYII=','base64');
     await child.locator('input[type=file]').first().setInputFiles({name:'test.png',mimeType:'image/png',buffer:png});
     await child.getByRole('button',{name:'ارسال عکس',exact:true}).click();
-    await until(()=>dad.locator('img').evaluateAll(images=>images.some(i=>i.src.includes('.convex.')&&i.complete&&i.naturalWidth>0)),'recipient image pixels');
+    await until(()=>dad.locator('[data-mid] img').evaluateAll(images=>images.some(i=>i.complete&&i.naturalWidth===12&&i.naturalHeight===12)),'recipient image pixels');
   });
   await check('Recorded voice note uploads and can be played by the recipient',async()=>{
     await child.getByRole('button',{name:'ضبط پیام صوتی',exact:true}).click();
@@ -148,5 +149,6 @@ try {
 } finally {
   report.finishedAt=new Date().toISOString();report.pageErrors=pageErrors;
   writeFileSync('e2e-results/report.json',JSON.stringify(report,null,2));
+  diagnostics.save('e2e-results/diagnostics.json');
   for(const ctx of contexts) await ctx.close();await browser.close();
 }
