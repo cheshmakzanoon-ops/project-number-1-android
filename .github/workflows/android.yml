@@ -3,9 +3,7 @@ name: Verify Android companion
 on:
   push:
     branches: [main]
-    paths: ['android/**', '.github/workflows/android.yml']
   pull_request:
-    paths: ['android/**', '.github/workflows/android.yml']
   workflow_dispatch:
 
 permissions:
@@ -36,10 +34,52 @@ jobs:
           gradle-version: '8.9'
       - name: Install pinned SDK
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Build, lint and test
+      - name: Build, lint and test debug variant
         working-directory: android
         run: gradle --no-daemon --stacktrace :app:assembleDebug :app:lintDebug :app:testDebugUnitTest
-      - name: Upload debug build and reports
+      - name: Generate disposable release-verification key
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/garma-ci.jks" -storetype JKS -alias ci-verification -keyalg RSA -keysize 2048 -validity 2 -dname 'CN=Garma CI Verification Only' -storepass ci-verification-only -keypass ci-verification-only -noprompt
+      - name: Verify optimized release APK and App Bundle
+        working-directory: android
+        env:
+          GARMA_KEYSTORE_PATH: ${{ runner.temp }}/garma-ci.jks
+          GARMA_KEYSTORE_PASSWORD: ci-verification-only
+          GARMA_KEY_ALIAS: ci-verification
+          GARMA_KEY_PASSWORD: ci-verification-only
+        run: gradle --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease :app:lintRelease :app:testReleaseUnitTest
+      - name: Require passing tests and a non-debuggable signed release APK
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$RUNNER_TEMP/release-badging.txt"
+          if grep -q 'application-debuggable' "$RUNNER_TEMP/release-badging.txt"; then
+            echo '::error::The release package must not be debuggable.'
+            exit 1
+          fi
+          test -s android/app/build/outputs/bundle/release/app-release.aab
+          python3 - <<'PY'
+          import json, pathlib, xml.etree.ElementTree as ET
+          report = {'scope': 'Native JVM tests, lint and debug/optimized-release compilation. Release signing uses a disposable CI-only key; no installable production release is published.', 'variants': {}}
+          for variant in ['Debug', 'Release']:
+              paths = pathlib.Path(f'android/app/build/test-results/test{variant}UnitTest').glob('TEST-*.xml')
+              cases = [c for p in paths for c in ET.parse(p).getroot().iter('testcase')]
+              assert len(cases) >= 12, f'{variant}: missing native test cases'
+              assert not any(c.find(tag) is not None for c in cases for tag in ['failure', 'error', 'skipped']), f'{variant}: failed/skipped tests'
+              lint = ET.parse(f'android/app/build/reports/lint-results-{variant.lower()}.xml').getroot()
+              issues = list(lint.iter('issue'))
+              assert not any(i.get('severity') in ['Error', 'Fatal'] for i in issues), f'{variant}: lint errors'
+              report['variants'][variant.lower()] = {'tests': len(cases), 'lintErrors': 0, 'lintWarnings': sum(i.get('severity') == 'Warning' for i in issues)}
+          pathlib.Path('android/app/build/reports/native-verification.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          PY
+      - name: Remove disposable signing material and test-signed release packages
+        if: ${{ always() }}
+        run: |
+          rm -f "$RUNNER_TEMP/garma-ci.jks"
+          rm -rf android/app/build/outputs/apk/release android/app/build/outputs/bundle/release
+      - name: Upload debug-only build and verification reports
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -47,5 +87,6 @@ jobs:
           path: |
             android/app/build/outputs/apk/debug/*.apk
             android/app/build/reports/
+            android/app/build/test-results/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
