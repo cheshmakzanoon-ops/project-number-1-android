@@ -47,6 +47,7 @@ ENV
 chmod 600 "$RUNNER_TEMP/garma-test-env"
 bunx convex env set --from-file "$RUNNER_TEMP/garma-test-env"
 bunx convex deploy --yes --typecheck enable --codegen enable
+node scripts/e2e/check-runtime.mjs
 bun run build
 npm install --prefix "$E2E_TOOLS" --ignore-scripts --no-audit --no-fund playwright@1.63.0
 node "$E2E_TOOLS/node_modules/playwright/cli.js" install --with-deps chromium
