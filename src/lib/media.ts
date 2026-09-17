@@ -13,6 +13,7 @@ const JPEG_QUALITY = 0.82;
 
 /** Downscale + re-encode an image file so uploads stay small and fast. */
 export async function compressImage(file: Blob): Promise<Blob> {
+  if (!file.size || file.size > 30 * 1024 * 1024) throw new Error("image_too_large_or_empty");
   const dataUrl = await readAsDataURL(file);
   const img = await loadImage(dataUrl);
   const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
@@ -40,6 +41,7 @@ function readAsDataURL(blob: Blob): Promise<string> {
     const fr = new FileReader();
     fr.onload = () => resolve(String(fr.result));
     fr.onerror = () => reject(fr.error ?? new Error("read_failed"));
+    fr.onabort = () => reject(new Error("read_cancelled"));
     fr.readAsDataURL(blob);
   });
 }
@@ -58,24 +60,26 @@ export function objectUrlFor(blob: Blob): string {
   return URL.createObjectURL(blob);
 }
 
-/**
- * PUT a blob to a Convex storage upload URL and return the storageId to store
- * on the message. Convex returns the id as JSON (`{storageId}`); older builds
- * sent it back in an `x-convex-storage-id` header — handle both.
- */
+/** Uploads use Convex's POST contract. The deadline also covers the response body. */
 export async function putStorageFile(uploadUrl: string, blob: Blob): Promise<string> {
-  const res = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": blob.type || "application/octet-stream" },
-    body: blob,
-  });
-  if (!res.ok) throw new Error("upload_failed");
-  const headerId = res.headers.get("x-convex-storage-id");
-  if (headerId) return headerId;
-  const json: unknown = await res.json().catch(() => null);
-  const sid = (json as { storageId?: string } | null)?.storageId;
-  if (!sid) throw new Error("no_storage_id");
-  return sid;
+  if (!blob.size || blob.size > 10 * 1024 * 1024) throw new Error("file_too_large_or_empty");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const res = await fetch(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      body: blob,
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error("upload_failed");
+    const json: unknown = await res.json();
+    const sid = (json as { storageId?: unknown } | null)?.storageId;
+    if (typeof sid !== "string" || !sid.trim()) throw new Error("no_storage_id");
+    return sid;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 /** Format ms as m:ss with Persian digits, e.g. «۱:۰۴». */
@@ -114,7 +118,10 @@ export interface VoiceRecording {
   mimeType: string;
 }
 
-/** Records until `stop()` is called; tracks elapsed ms. */
+/**
+ * Permission requests can resolve after navigation. Cancellation owns every
+ * eventual stream, not just the stream that existed when Cancel was pressed.
+ */
 export function startRecording(opts?: {
   onTick?: (ms: number) => void;
   onError?: (msg: string) => void;
@@ -122,68 +129,85 @@ export function startRecording(opts?: {
   stop: () => Promise<VoiceRecording>;
   cancel: () => void;
 } {
-  const mimeType = pickRecordingMime() || "audio/webm";
-  let rec: MediaRecorder;
+  let rec: MediaRecorder | null = null;
   let stream: MediaStream | null = null;
-  let resolveStop: ((r: VoiceRecording) => void) | null = null;
-  let rejectStop: ((e: Error) => void) | null = null;
-  const chunks: BlobPart[] = [];
-  const started = Date.now();
-  let timer: number | null = null;
-
-  const stopP = new Promise<VoiceRecording>((resolve, reject) => {
+  let settled = false;
+  let stopping = false;
+  let started = 0;
+  let duration = 0;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let stopDeadline: ReturnType<typeof setTimeout> | undefined;
+  const chunks: Blob[] = [];
+  let resolveStop!: (r: VoiceRecording) => void;
+  let rejectStop!: (e: Error) => void;
+  const result = new Promise<VoiceRecording>((resolve, reject) => {
     resolveStop = resolve;
     rejectStop = reject;
   });
+  // A permission denial/cancel may occur before anyone calls stop(). Keep
+  // the original promise rejected for its caller without an unhandled rejection.
+  void result.catch(() => {});
 
-  const begin = async () => {
-    stream = await navigator.mediaDevices.getUserMedia({
+  const release = () => {
+    clearInterval(timer);
+    clearTimeout(permissionDeadline);
+    clearTimeout(stopDeadline);
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+  };
+  const fail = (error: Error, notify = true) => {
+    if (settled) return;
+    settled = true;
+    if (rec) {
+      rec.ondataavailable = rec.onstop = rec.onerror = null;
+      try { if (rec.state !== "inactive") rec.stop(); } catch { /* already stopped */ }
+    }
+    release();
+    rejectStop(error);
+    if (notify) opts?.onError?.(error.name === "NotAllowedError" || error.name === "SecurityError"
+      ? "دسترسی به میکروفون داده نشد"
+      : "ضبط صدا متوقف شد؛ دسترسی میکروفون را بررسی و دوباره تلاش کن.");
+  };
+  const stop = (): Promise<VoiceRecording> => {
+    if (settled || stopping) return result;
+    stopping = true;
+    if (!rec) {
+      fail(new Error("recording_not_started"), false);
+      return result;
+    }
+    duration = Math.max(0, Date.now() - started);
+    clearInterval(timer);
+    stopDeadline = setTimeout(() => fail(new Error("recorder_stop_timeout")), 5_000);
+    try { if (rec.state !== "inactive") rec.stop(); } catch (e) { fail(e as Error); }
+    return result;
+  };
+  const permissionDeadline = setTimeout(() => fail(new Error("microphone_timeout")), 30_000);
+  void (async () => {
+    const acquired = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    rec.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
+    if (settled) {
+      acquired.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    stream = acquired;
+    clearTimeout(permissionDeadline);
+    const mime = pickRecordingMime();
+    rec = new MediaRecorder(acquired, mime ? { mimeType: mime } : undefined);
+    rec.ondataavailable = (e) => { if (!settled && e.data.size) chunks.push(e.data); };
+    rec.onerror = () => fail(new Error("recorder_error"));
     rec.onstop = () => {
-      stream?.getTracks().forEach((t) => t.stop());
-      if (timer != null) window.clearInterval(timer);
-      const blob = new Blob(chunks, { type: rec.mimeType || mimeType });
-      resolveStop?.({ blob, durationMs: Date.now() - started, mimeType: blob.type });
-    };
-    rec.onerror = () => {
-      stream?.getTracks().forEach((t) => t.stop());
-      if (timer != null) window.clearInterval(timer);
-      rejectStop?.(new Error("recorder_error"));
+      if (settled) return;
+      duration = stopping ? duration : Math.max(0, Date.now() - started);
+      const blob = new Blob(chunks, { type: rec?.mimeType || chunks[0]?.type || mime });
+      if (!blob.size) { fail(new Error("empty_recording")); return; }
+      settled = true;
+      release();
+      resolveStop({ blob, durationMs: duration, mimeType: blob.type });
     };
     rec.start(250);
-    timer = window.setInterval(() => opts?.onTick?.(Date.now() - started), 250);
-  };
-
-  void begin().catch((e) => {
-    rejectStop?.(e as Error);
-    opts?.onError?.((e as Error).name === "NotAllowedError" || (e as Error).name === "SecurityError"
-      ? "دسترسی به میکروفون داده نشد"
-      : "میکروفون در دسترس نیست");
-  });
-
-  return {
-    stop: async () => {
-      if (rec && rec.state !== "inactive") rec.stop();
-      return await stopP;
-    },
-    cancel: () => {
-      if (rec && rec.state !== "inactive") {
-        rec.ondataavailable = null;
-        rec.onstop = null;
-        try {
-          rec.stop();
-        } catch {
-          /* noop */
-        }
-      }
-      stream?.getTracks().forEach((t) => t.stop());
-      if (timer != null) window.clearInterval(timer);
-      rejectStop?.(new Error("cancelled"));
-    },
-  };
+    started = Date.now();
+    timer = setInterval(() => opts?.onTick?.(Date.now() - started), 250);
+  })().catch((e: unknown) => fail(e instanceof Error ? e : new Error("microphone_unavailable")));
+  return { stop, cancel: () => fail(new Error("cancelled"), false) };
 }

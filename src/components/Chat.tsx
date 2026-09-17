@@ -25,7 +25,8 @@ import { Avatar } from "./Avatar";
 import { ImageBubble, ReplyChip, VoiceNoteBubble } from "./MessageMedia";
 import { Lightbox } from "./Lightbox";
 import { clock, fa, formatDay, relative } from "../lib/format";
-import { loadDraft, loadOutbox, newClientMsgId, saveDraft, saveOutbox, type PendingMessage } from "../lib/outbox";
+import { loadDraft, newClientMsgId, saveDraft } from "../lib/outbox";
+import { useMessageOutbox } from "../lib/useMessageOutbox";
 import {
   compressImage,
   formatDurationMs,
@@ -128,7 +129,6 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const scrolledRef = useRef(false);
   const [showJump, setShowJump] = useState(false);
-  const lastReadSentRef = useRef(0);
   const typingLastSentRef = useRef(0);
   const typingStopRef = useRef<number | null>(null);
 
@@ -154,8 +154,11 @@ export function Chat({
   // ---- media compose ----
   const [photoPending, setPhotoPending] = useState<PendingPhoto | null>(null);
   const [mediaBusy, setMediaBusy] = useState(false);
+  const mediaBusyRef = useRef(false);
+  const mediaAttempts = useRef(new WeakMap<Blob, { clientId: string; storageId?: string }>());
+  const [voicePending, setVoicePending] = useState<VoiceRecording | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [voicePhase, setVoicePhase] = useState<"idle" | "recording" | "sending">("idle");
+  const [voicePhase, setVoicePhase] = useState<"idle" | "recording" | "sending" | "retry">("idle");
   const [voiceMs, setVoiceMs] = useState(0);
   const voiceHandleRef = useRef<{ stop: () => Promise<VoiceRecording>; cancel: () => void } | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -301,16 +304,17 @@ export function Chat({
     scrolledRef.current = false;
   }, []);
 
-  // ---- read receipts ----
+  // Only the visible latest view advances the read cursor.
+  const latestId = latest.at(-1)?._id;
   useEffect(() => {
-    if (anchored) return;
-    const unread = latest.some((m) => !m.isMine && !m.deletedAt);
-    if (unread && Date.now() - lastReadSentRef.current > 800) {
-      lastReadSentRef.current = Date.now();
-      markRead({ conversationId, token });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [latest.length, conversationId, token, anchored]);
+    const read = () => {
+      if (anchored || !latestId || document.visibilityState !== "visible" || !stickRef.current) return;
+      void markRead({ conversationId, token }).catch(() => {});
+    };
+    read();
+    document.addEventListener("visibilitychange", read);
+    return () => document.removeEventListener("visibilitychange", read);
+  }, [latestId, conversationId, token, anchored, markRead]);
 
   // close menu on Escape
   useEffect(() => {
@@ -325,100 +329,20 @@ export function Chat({
   useEffect(() => {
     return () => {
       if (typingStopRef.current) window.clearTimeout(typingStopRef.current);
-      void stopTypingMut({ conversationId, token });
+      void stopTypingMut({ conversationId, token }).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, token]);
 
-  // ---- flaky-connection outbox (text only) ----
-  const outboxRef = useRef<Record<string, PendingMessage[]>>({});
-  const [, setOutboxTick] = useState(0);
-  const flushBusyRef = useRef(false);
-  const outboxTimerRef = useRef<number | null>(null);
-  const outboxDelayRef = useRef(2000);
-  const convRef = useRef(conversationId);
-  convRef.current = conversationId;
-
-  const bumpOutbox = useCallback(() => setOutboxTick((t) => t + 1), []);
-  const clearOutboxTimer = useCallback(() => {
-    if (outboxTimerRef.current != null) {
-      window.clearTimeout(outboxTimerRef.current);
-      outboxTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleRetry = useCallback(() => {
-    if (outboxTimerRef.current != null) return;
-    outboxTimerRef.current = window.setTimeout(() => {
-      outboxTimerRef.current = null;
-      void flushOutboxRef.current();
-    }, outboxDelayRef.current);
-    outboxDelayRef.current = Math.min(outboxDelayRef.current * 2, 30_000);
-  }, []);
-
-  const flushOutbox = useCallback(async () => {
-    if (flushBusyRef.current) return;
-    const cid = convRef.current;
-    const queued = outboxRef.current[cid];
-    if (!queued || queued.length === 0) return;
-    flushBusyRef.current = true;
-    try {
-      let idx = 0;
-      while (idx < queued.length) {
-        const item = queued[idx];
-        try {
-          await send({ conversationId: cid, body: item.body, token, clientMessageId: item.clientMsgId });
-        } catch {
-          scheduleRetry();
-          return;
-        }
-        idx += 1;
-        bumpOutbox();
-      }
-    } finally {
-      flushBusyRef.current = false;
-    }
-  }, [bumpOutbox, scheduleRetry, send, token]);
-  const flushOutboxRef = useRef<() => void>(() => {});
-  flushOutboxRef.current = () => {
-    void flushOutbox();
-  };
-
+  const outbox = useMessageOutbox(conversationId, token, send);
+  const curPending = outbox.pending;
+  const dropPending = outbox.clear;
+  const flushOutbox = outbox.flush;
   useEffect(() => {
-    const cid = convRef.current;
-    const queued = outboxRef.current[cid];
-    if (!queued || queued.length === 0) return;
-    const ackedIds = new Set(
-      (latest as ChatMessage[]).filter((m) => m.clientMessageId && !m.deletedAt).map((m) => m.clientMessageId as string),
-    );
-    const rest = queued.filter((p) => !ackedIds.has(p.clientMsgId));
-    if (rest.length === queued.length) return;
-    outboxRef.current[cid] = rest;
-    saveOutbox(cid, rest);
-    bumpOutbox();
-  }, [latest, bumpOutbox]);
-
-  const queueMessage = useCallback(
-    (cid: Id<"conversations">, body: string, clientMsgId: string) => {
-      const list2 = [...(outboxRef.current[cid] ?? [])];
-      list2.push({ body, clientMsgId, queuedAt: Date.now() });
-      outboxRef.current[cid] = list2;
-      saveOutbox(cid, list2);
-      bumpOutbox();
-      outboxDelayRef.current = 2000;
-      scheduleRetry();
-    },
-    [bumpOutbox, scheduleRetry],
-  );
-
-  const dropPending = useCallback(() => {
-    outboxRef.current[conversationId] = [];
-    saveOutbox(conversationId, []);
-    clearOutboxTimer();
-    bumpOutbox();
-  }, [bumpOutbox, clearOutboxTimer, conversationId]);
-
-  const curPending = outboxRef.current[conversationId] ?? [];
+    const ids = new Set(latest.filter((m) => m.isMine && m.clientMessageId)
+      .map((m) => m.clientMessageId as string));
+    if (ids.size) outbox.acknowledge(ids);
+  }, [latest, outbox.acknowledge]);
 
   const prevPendingLenRef = useRef(0);
   useEffect(() => {
@@ -442,34 +366,9 @@ export function Chat({
     setDraft(loadDraft(conversationId));
   }, [conversationId]);
 
-  useEffect(() => {
-    clearOutboxTimer();
-    if (!outboxRef.current[conversationId]) {
-      outboxRef.current[conversationId] = loadOutbox(conversationId);
-      bumpOutbox();
-    }
-    outboxDelayRef.current = 2000;
-    if ((outboxRef.current[conversationId] ?? []).length > 0) {
-      const t = window.setTimeout(() => {
-        void flushOutboxRef.current();
-      }, 900);
-      return () => window.clearTimeout(t);
-    }
-  }, [bumpOutbox, clearOutboxTimer, conversationId]);
-
-  useEffect(() => {
-    const onOnline = () => {
-      outboxDelayRef.current = 2000;
-      void flushOutboxRef.current();
-    };
-    window.addEventListener("online", onOnline);
-    return () => window.removeEventListener("online", onOnline);
-  }, []);
-
   useEffect(
     () => () => {
       if (errTimerRef.current) window.clearTimeout(errTimerRef.current);
-      if (outboxTimerRef.current) window.clearTimeout(outboxTimerRef.current);
       if (flashTimerRef.current) window.clearTimeout(flashTimerRef.current);
     },
     [],
@@ -486,11 +385,11 @@ export function Chat({
     const now = Date.now();
     if (now - typingLastSentRef.current > 1500) {
       typingLastSentRef.current = now;
-      void startTypingMut({ conversationId, token });
+      void startTypingMut({ conversationId, token }).catch(() => {});
     }
     if (typingStopRef.current) window.clearTimeout(typingStopRef.current);
     typingStopRef.current = window.setTimeout(() => {
-      void stopTypingMut({ conversationId, token });
+      void stopTypingMut({ conversationId, token }).catch(() => {});
     }, 2000);
   };
 
@@ -498,7 +397,7 @@ export function Chat({
     const text = draft.trim();
     if (!text || sending) return;
     if (typingStopRef.current) window.clearTimeout(typingStopRef.current);
-    void stopTypingMut({ conversationId, token });
+    void stopTypingMut({ conversationId, token }).catch(() => {});
     setSending(true);
     try {
       if (editing) {
@@ -515,20 +414,9 @@ export function Chat({
         scrolledRef.current = true;
         return;
       }
-      const clientMsgId = newClientMsgId();
-      try {
-        await send({
-          conversationId,
-          body: text,
-          token,
-          clientMessageId: clientMsgId,
-          replyToId: replying?.id,
-        });
-      } catch {
-        // Offline/flaky: keep the text in the persistent outbox (reply
-        // context is a UI nicety and is intentionally dropped on retry).
-        queueMessage(conversationId, text, clientMsgId);
-        saveDraft(conversationId, "");
+      if (text.length > 4000) { showError("متن پیام باید حداکثر ۴۰۰۰ نویسه باشد."); return; }
+      if (!outbox.enqueue(text, replying?.id)) {
+        showError("پیام ذخیره نشد؛ صف ارسال یا حافظهٔ مرورگر پر است. متن شما پاک نشده است.");
         return;
       }
       setDraft("");
@@ -563,11 +451,17 @@ export function Chat({
   // ---- media: upload + send ----
   const uploadAndSend = useCallback(
     async (args: { kind: MessageKind; blob: Blob; body?: string; durationMs?: number }) => {
-      if (mediaBusy) return false;
+      if (mediaBusyRef.current) return false;
+      mediaBusyRef.current = true;
       setMediaBusy(true);
       try {
-        const up = await uploadUrlMut({ token });
-        const storageId = await putStorageFile(up, args.blob);
+        const attempt = mediaAttempts.current.get(args.blob) ?? { clientId: newClientMsgId() };
+        mediaAttempts.current.set(args.blob, attempt);
+        if (!attempt.storageId) {
+          const up = await uploadUrlMut({ token });
+          attempt.storageId = await putStorageFile(up, args.blob);
+        }
+        const storageId = attempt.storageId;
         await send({
           conversationId,
           token,
@@ -576,7 +470,7 @@ export function Chat({
           body: args.body,
           mimeType: args.blob.type || undefined,
           durationMs: args.durationMs,
-          clientMessageId: newClientMsgId(),
+          clientMessageId: attempt.clientId,
           replyToId: replying?.id,
         });
         return true;
@@ -584,10 +478,11 @@ export function Chat({
         showError(args.kind === "image" ? "ارسال عکس نشد — دوباره تلاش کن" : "ارسال پیام صوتی نشد — دوباره تلاش کن");
         return false;
       } finally {
+        mediaBusyRef.current = false;
         setMediaBusy(false);
       }
     },
-    [conversationId, mediaBusy, replying, send, showError, token, uploadUrlMut],
+    [conversationId, replying, send, showError, token, uploadUrlMut],
   );
 
   const pickImage = async (file: File | null) => {
@@ -667,28 +562,32 @@ export function Chat({
     voiceHandleRef.current?.cancel();
     voiceHandleRef.current = null;
     setVoicePhase("idle");
+    setVoicePending(null);
     setVoiceMs(0);
   }, []);
 
   const finishVoice = useCallback(async () => {
     const handle = voiceHandleRef.current;
-    if (!handle) return;
+    if (!handle && !voicePending) return;
+    if (mediaBusyRef.current || voicePhase === "sending") return;
     setVoicePhase("sending");
     try {
-      const rec = await handle.stop();
+      const rec = voicePending ?? await handle!.stop();
       voiceHandleRef.current = null;
+      setVoicePending(rec);
       const ok = await sendVoice(rec);
-      setVoiceMs(0);
-      setVoicePhase("idle");
-      void ok;
+      if (ok) { setVoicePending(null); setVoiceMs(0); setVoicePhase("idle"); }
+      else setVoicePhase("retry");
     } catch {
       voiceHandleRef.current = null;
       setVoicePhase("idle");
       setVoiceMs(0);
       showError("ضبط کامل نشد — دوباره امتحان کن");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sendVoice, showError]);
+  }, [sendVoice, showError, voicePending, voicePhase]);
+  useEffect(() => {
+    if (voicePhase === "recording" && voiceMs >= 290_000) void finishVoice();
+  }, [finishVoice, voiceMs, voicePhase]);
 
   // If the user leaves mid-recording (e.g. call overlay takes over), stop.
   useEffect(() => {
@@ -700,7 +599,7 @@ export function Chat({
 
   // ---- toggles ----
   const toggleMute = () => {
-    void setMutedMut({ conversationId, muted: !muted, token }).catch(() => {});
+    void setMutedMut({ conversationId, muted: !muted, token }).catch(() => showError("تنظیم بی‌صدا ذخیره نشد؛ دوباره تلاش کن."));
   };
 
   // ---- header subtitle ----
@@ -985,7 +884,6 @@ export function Chat({
             <button
               type="button"
               onClick={() => {
-                outboxDelayRef.current = 2000;
                 void flushOutbox();
               }}
               className="flex shrink-0 items-center gap-1 rounded-full bg-ember-400 px-3 py-1.5 text-cocoa transition hover:bg-ember-300 active:scale-95"
@@ -1014,6 +912,7 @@ export function Chat({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={1}
+              maxLength={1000}
               placeholder="توضیح عکس (اختیاری)…"
               className="min-h-[44px] max-h-20 flex-1 resize-none rounded-2xl border border-dusk-300/60 bg-dusk-50/80 px-4 py-2.5 text-[15px] text-dusk-950 caret-ember-300 shadow-sm outline-none placeholder:text-dusk-600 focus:border-ember-400/70 focus:ring-2 focus:ring-ember-400/30"
             />
@@ -1059,12 +958,13 @@ export function Chat({
               }}
               onFocus={notifyTyping}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
                   onSend();
                 }
               }}
               rows={1}
+              maxLength={4000}
               placeholder={editing ? "ویرایش متن…" : replying ? "پاسخ به " + replying.senderName + "…" : "پیام خود را بنویسید…"}
               className="min-h-[48px] max-h-32 flex-1 resize-none rounded-2xl border border-dusk-300/60 bg-dusk-50/80 px-4 py-3 text-[15px] text-dusk-950 caret-ember-300 shadow-sm outline-none placeholder:text-dusk-600 focus:border-ember-400/70 focus:ring-2 focus:ring-ember-400/30"
             />
@@ -1102,14 +1002,14 @@ export function Chat({
                 "در حال ارسال…"
               ) : (
                 <>
-                  در حال ضبط…
+                  {voicePhase === "retry" ? "ارسال نشد — تلاش دوباره یا حذف" : "در حال ضبط…"}
                   <span className="mx-1 font-black tabular-nums text-rose-300" dir="ltr">
                     {formatDurationMs(voiceMs)}
                   </span>
                 </>
               )}
             </span>
-            {voicePhase === "recording" && (
+            {(voicePhase === "recording" || voicePhase === "retry") && (
               <>
                 <button
                   type="button"
@@ -1423,7 +1323,7 @@ function Bubble({
                 mine ? "right-2" : "left-2"
               }`}
             >
-              {Object.entries(msg.reactions).map(([emoji, count]) => (
+              {(Array.isArray(msg.reactions) ? msg.reactions.map((r) => [r.emoji, r.count] as const) : Object.entries(msg.reactions)).map(([emoji, count]) => (
                 <span key={emoji} title={`${fa(count)}`}>
                   {emoji}
                   {count > 1 && <span className="text-[10px] text-dusk-600">{fa(count)}</span>}

@@ -12,9 +12,10 @@ export interface PendingMessage {
   body: string;
   clientMsgId: string;
   queuedAt: number;
+  replyToId?: string;
 }
 
-const MAX_PENDING = 50;
+export const MAX_PENDING = 50;
 
 function key(conversationId: string): string {
   return `garma.outbox.${conversationId}`;
@@ -34,15 +35,16 @@ export function loadOutbox(conversationId: string): PendingMessage[] {
   }
 }
 
-export function saveOutbox(conversationId: string, messages: PendingMessage[]): void {
+export function saveOutbox(conversationId: string, messages: PendingMessage[]): boolean {
   try {
     if (messages.length === 0) {
       localStorage.removeItem(key(conversationId));
     } else {
-      localStorage.setItem(key(conversationId), JSON.stringify(messages.slice(-MAX_PENDING)));
+      localStorage.setItem(key(conversationId), JSON.stringify(messages));
     }
+    return true;
   } catch {
-    /* storage full / unavailable: the in-memory queue still retries this session */
+    return false; // The composer must retain the draft rather than claim persistence.
   }
 }
 

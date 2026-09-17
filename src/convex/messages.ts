@@ -15,7 +15,7 @@ type MessageRow = {
   deletedAt: number | undefined;
   isMine: boolean;
   read: boolean;
-  reactions: Record<string, number>;
+  reactions: Array<{ emoji: string; count: number }>;
   usersReacted: boolean;
   clientMessageId: string | undefined;
   kind: MessageKind;
@@ -45,7 +45,7 @@ type MsgDoc = Doc<"messages">;
 async function enrich(ctx: Pick<QueryCtx, "db" | "storage">, msgs: MsgDoc[], me: Id<"users">): Promise<MessageRow[]> {
   if (msgs.length === 0) return [];
 
-  const ordered = msgs.slice().reverse();
+  const ordered = msgs.slice().sort((a, b) => a.createdAt - b.createdAt || a._creationTime - b._creationTime || a._id.localeCompare(b._id));
 
   // Read cursor of "the other side" for WhatsApp ticks (only meaningful in a
   // true 1:1 — group chats never claim a double tick).
@@ -68,7 +68,7 @@ async function enrich(ctx: Pick<QueryCtx, "db" | "storage">, msgs: MsgDoc[], me:
       ),
     ),
     (async () => {
-      const ids = [...new Set(ordered.filter((m) => m.storageId).map((m) => m.storageId as Id<"_storage">))];
+      const ids = [...new Set(ordered.filter((m) => m.storageId && !m.deletedAt).map((m) => m.storageId as Id<"_storage">))];
       const map = new Map<string, string | null>();
       await Promise.all(
         ids.map(async (sid) => {
@@ -86,7 +86,7 @@ async function enrich(ctx: Pick<QueryCtx, "db" | "storage">, msgs: MsgDoc[], me:
           if (!target || target.conversationId !== ordered[0].conversationId) return;
           const sender = await ctx.db.get(target.senderId);
           map.set(rid, {
-            body: target.body,
+            body: target.deletedAt ? "" : target.body,
             deleted: !!target.deletedAt,
             kind: target.kind ?? "text",
             senderName: sender?.displayName ?? "…",
@@ -112,13 +112,13 @@ async function enrich(ctx: Pick<QueryCtx, "db" | "storage">, msgs: MsgDoc[], me:
     return {
       _id: m._id,
       senderId: m.senderId,
-      body: m.body,
+      body: m.deletedAt ? "" : m.body,
       createdAt: m.createdAt,
       editedAt: m.editedAt,
       deletedAt: m.deletedAt,
       isMine: m.senderId === me,
       read: isDM && m.senderId === me && !m.deletedAt && m.createdAt <= otherReadAt,
-      reactions: counts,
+      reactions: m.deletedAt ? [] : Object.entries(counts).map(([emoji, count]) => ({ emoji, count })),
       usersReacted,
       clientMessageId: m.clientMessageId,
       kind,
@@ -270,6 +270,10 @@ export const send = mutation({
       replyToId = args.replyToId;
     }
 
+    if (text.length > (kind === "image" ? 1000 : 4000)) throw new Error("message_too_long");
+    if (args.durationMs != null && (!Number.isFinite(args.durationMs) || args.durationMs < 0 || args.durationMs > 5 * 60_000)) throw new Error("invalid_duration");
+    if (args.clientMessageId && args.clientMessageId.length > 128) throw new Error("invalid_client_id");
+
     // kind-specific validation
     if (kind === "text") {
       if (!text) throw new Error("empty");
@@ -286,7 +290,10 @@ export const send = mutation({
         .query("messages")
         .withIndex("by_sender_client", (q) => q.eq("senderId", me).eq("clientMessageId", args.clientMessageId))
         .first();
-      if (dup) return dup._id;
+      if (dup) {
+        if (dup.conversationId !== args.conversationId) throw new Error("client_id_conflict");
+        return dup._id;
+      }
     }
 
     const now = Date.now();
@@ -349,6 +356,8 @@ export const toggleReaction = mutation({
     if (!me) throw new Error("unauthorized");
     const msg = await ctx.db.get(args.messageId);
     if (!msg || msg.deletedAt) throw new Error("gone");
+    if (!await membershipOf(ctx, msg.conversationId, me)) throw new Error("not_member");
+    if (!["❤️", "👍", "😂", "😮", "😢", "🙏", "🔥", "😍"].includes(args.emoji)) throw new Error("invalid_reaction");
 
     const existing = await ctx.db
       .query("reactions")

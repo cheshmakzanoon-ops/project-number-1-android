@@ -1,6 +1,8 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, internalQuery, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+
+import { validPushSubscription } from "../lib/pushValidation";
 
 /** Web Push subscription storage (plain queries/mutations — no Node APIs). */
 
@@ -14,6 +16,7 @@ export const saveSubscription = mutation({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
+    if (!validPushSubscription(args.endpoint, args.p256dh, args.auth)) throw new Error("invalid_push_subscription");
     const existing = await ctx.db
       .query("pushSubscriptions")
       .withIndex("by_endpoint", (q) => q.eq("endpoint", args.endpoint))
@@ -27,6 +30,8 @@ export const saveSubscription = mutation({
       });
       return existing._id;
     }
+    const devices = await ctx.db.query("pushSubscriptions").withIndex("by_user", (q) => q.eq("userId", me)).collect();
+    if (devices.length >= 10) throw new Error("too_many_push_devices");
     return await ctx.db.insert("pushSubscriptions", {
       userId: me,
       endpoint: args.endpoint,
@@ -51,7 +56,7 @@ export const removeSubscription = mutation({
 });
 
 /** All push endpoints registered for one user. */
-export const listSubscriptions = query({
+export const listSubscriptions = internalQuery({
   args: { userId: v.id("users") },
   handler: async (ctx, args) => {
     return await ctx.db
@@ -62,7 +67,7 @@ export const listSubscriptions = query({
 });
 
 /** Delete a dead endpoint. */
-export const pruneSubscription = mutation({
+export const pruneSubscription = internalMutation({
   args: { endpoint: v.string() },
   handler: async (ctx, args) => {
     const existing = await ctx.db

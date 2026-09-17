@@ -46,7 +46,7 @@ export interface ChatMessage {
   isMine: boolean;
   /** For messages I sent: has the other participant read it yet (WhatsApp tick). */
   read: boolean;
-  reactions: Record<string, number>;
+  reactions: Array<{ emoji: string; count: number }> | Record<string, number>;
   usersReacted: boolean;
   /** Stable client-generated id; lets queued sends match their acked row. */
   clientMessageId?: string;

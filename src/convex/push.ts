@@ -2,7 +2,8 @@
 import { action, env } from "./_generated/server";
 import { v } from "convex/values";
 import webpush from "web-push";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
+import { validPushSubscription } from "../lib/pushValidation";
 import type { Id } from "./_generated/dataModel";
 
 /**
@@ -46,7 +47,7 @@ export const notifyIncomingCall = action({
       callId: args.callId,
       token: args.token,
     });
-    if (!details || !details.isMine || details.call.status !== "ringing") {
+    if (!details || !details.isMine || details.call.initiatorId !== me._id || details.call.status !== "ringing") {
       throw new Error("unauthorized");
     }
     // runQuery results are untyped here, so pin the shape we need.
@@ -69,25 +70,25 @@ export const notifyIncomingCall = action({
     webpush.setVapidDetails("mailto:garma@freebuff.app", pub, priv);
 
     const callerName = me.displayName;
-    const kindWord = args.kind === "video" ? "تصویری" : "صوتی";
+    const kindWord = details.call.kind === "video" ? "تصویری" : "صوتی";
     const payload = JSON.stringify({
       type: "incoming_call",
       callId: args.callId,
       callerName,
-      kind: args.kind,
+      kind: details.call.kind,
       // Re-send on every ring: "renotify" in the service worker replaces
       // older identical-tag notifications and rings again.
       timestamp: Date.now(),
       title: isGroup
-        ? args.kind === "video"
+        ? details.call.kind === "video"
           ? "تماس گروهی تصویری گرما"
           : "تماس گروهی صوتی گرما"
-        : args.kind === "video"
+        : details.call.kind === "video"
           ? "تماس تصویری گرما"
           : "تماس صوتی گرما",
       body: isGroup
         ? `${callerName} با ${allMembers.filter((m) => m.userId !== me._id).length} نفر تماس ${kindWord} گرفت`
-        : args.kind === "video"
+        : details.call.kind === "video"
           ? `${callerName} می‌خواهد با تو گفتگوی تصویری کند`
           : `${callerName} می‌خواهد با تو حرف بزند`,
       vibrate: [500, 200, 500, 200, 500, 200, 900],
@@ -95,21 +96,22 @@ export const notifyIncomingCall = action({
 
     let sent = 0;
     for (const calleeId of calleeIds) {
-      const subs = await ctx.runQuery(api.pushSubs.listSubscriptions, { userId: calleeId });
+      const subs = await ctx.runQuery(internal.pushSubs.listSubscriptions, { userId: calleeId });
       for (const s of subs) {
+        if (!validPushSubscription(s.endpoint, s.p256dh, s.auth)) continue;
         try {
           await webpush.sendNotification(
             { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
             payload,
             // High urgency = the OS may wake the device, play its default
             // notification sound, and vibrate even when the screen is off.
-            { urgency: "high", TTL: 45 },
+            { urgency: "high", TTL: 45, timeout: 10_000 },
           );
           sent++;
         } catch (err) {
           const status = (err as { statusCode?: number }).statusCode;
           if (status === 404 || status === 410) {
-            await ctx.runMutation(api.pushSubs.pruneSubscription, { endpoint: s.endpoint });
+            await ctx.runMutation(internal.pushSubs.pruneSubscription, { endpoint: s.endpoint });
           }
         }
       }

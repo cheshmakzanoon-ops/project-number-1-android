@@ -45,7 +45,7 @@ function sandboxConvexCandidate(): string | null {
  * with no user-visible wait beyond the probe.
  */
 async function resolveConvexUrl(): Promise<string> {
-  const candidate = sandboxConvexCandidate();
+  const candidate = import.meta.env.DEV ? sandboxConvexCandidate() : null;
   if (!candidate) return CONVEX_URL;
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), 2500);

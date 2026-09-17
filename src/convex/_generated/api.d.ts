@@ -234,18 +234,6 @@ export declare const api: {
     vapidPublicKey: FunctionReference<"action", "public", {}, any>;
   };
   pushSubs: {
-    listSubscriptions: FunctionReference<
-      "query",
-      "public",
-      { userId: Id<"users"> },
-      any
-    >;
-    pruneSubscription: FunctionReference<
-      "mutation",
-      "public",
-      { endpoint: string },
-      any
-    >;
     removeSubscription: FunctionReference<
       "mutation",
       "public",
@@ -350,6 +338,10 @@ export declare const api: {
  * ```
  */
 export declare const internal: {
+  pushSubs: {
+    listSubscriptions: FunctionReference<"query", "internal", { userId: Id<"users"> }, Array<{endpoint: string; p256dh: string; auth: string}>>;
+    pruneSubscription: FunctionReference<"mutation", "internal", { endpoint: string }, void>;
+  };
   screenShare: {
     consumeHandoff: FunctionReference<
       "mutation",

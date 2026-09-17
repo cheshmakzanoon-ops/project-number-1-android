@@ -1,10 +1,10 @@
-import { internalMutation, query, type MutationCtx } from "./_generated/server";
+import { internalMutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import {
   callAllowsScreenPublish,
   handoffVerdict,
-  shareSessionLive,
+  participantMayPublishScreen,
   HANDOFF_TTL_MS,
 } from "../lib/screenShareProtocol";
 
@@ -28,6 +28,22 @@ import {
 /** Hard TTL, capped so a handoff can never be a long-lived credential. */
 const MAX_TTL_MS = 60_000;
 
+async function participantLive(ctx: Pick<QueryCtx, "db">, userId: Id<"users">, callId: Id<"calls">) {
+  const call = await ctx.db.get(callId);
+  if (!call || !callAllowsScreenPublish(call.status)) return false;
+  const participant = await ctx.db.query("callParticipants")
+    .withIndex("by_call_user", (q) => q.eq("callId", callId).eq("userId", userId)).first();
+  return participantMayPublishScreen(participant, call.initiatorId === userId);
+}
+
+async function sessionLive(ctx: Pick<QueryCtx, "db">, row: Doc<"screenShareHandoffs">) {
+  return row.consumedAt != null && await participantLive(ctx, row.userId, row.callId);
+}
+
+async function shouldPrune(ctx: MutationCtx, row: Doc<"screenShareHandoffs">, now: number) {
+  return row.consumedAt == null ? row.expiresAt <= now : !await sessionLive(ctx, row);
+}
+
 /**
  * Create the handoff row for a user+call. Called only by the action that
  * already verified (a) the caller's session and (b) that they are a live,
@@ -42,6 +58,7 @@ export const insertHandoff = internalMutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+    if (!await participantLive(ctx, args.userId, args.callId)) throw new Error("not_active_participant");
     // Drop this user's dead rows opportunistically so the table cannot grow
     // without bound (there is no scheduler in this app) — and, more
     // importantly, so a previous code can never be resurrected later.
@@ -50,7 +67,7 @@ export const insertHandoff = internalMutation({
       .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     for (const row of mine) {
-      if (row.consumedAt != null || row.expiresAt <= now) await ctx.db.delete(row._id);
+      if (await shouldPrune(ctx, row, now)) await ctx.db.delete(row._id);
     }
     const ttl = Math.min(Math.max(args.ttlMs ?? HANDOFF_TTL_MS, 1_000), MAX_TTL_MS);
     return await ctx.db.insert("screenShareHandoffs", {
@@ -88,22 +105,7 @@ export const consumeHandoff = internalMutation({
       .first();
     if (handoffVerdict(row, now) !== "ok") return null;
     const r = row!;
-    const call = await ctx.db.get(r.callId);
-    if (!callAllowsScreenPublish(call?.status)) return null;
-    const participant = await ctx.db
-      .query("callParticipants")
-      .withIndex("by_call_user", (q) => q.eq("callId", r.callId).eq("userId", r.userId))
-      .first();
-    if (
-      !shareSessionLive({
-        callStatus: call?.status,
-        participantLeftAt: participant?.leftAt ?? null,
-        acceptedAt: participant?.acceptedAt ?? null,
-        isInitiator: call?.initiatorId === r.userId,
-      })
-    ) {
-      return null;
-    }
+    if (!await participantLive(ctx, r.userId, r.callId)) return null;
     const user = await ctx.db.get(r.userId);
     if (!user) return null;
     await ctx.db.patch(r._id, { consumedAt: now });
@@ -127,20 +129,7 @@ export const sessionState = query({
   args: { sessionId: v.id("screenShareHandoffs") },
   handler: async (ctx, args) => {
     const row = await ctx.db.get(args.sessionId);
-    if (!row) return { live: false };
-    const call = await ctx.db.get(row.callId);
-    const participant = await ctx.db
-      .query("callParticipants")
-      .withIndex("by_call_user", (q) => q.eq("callId", row.callId).eq("userId", row.userId))
-      .first();
-    return {
-      live: shareSessionLive({
-        callStatus: call?.status,
-        participantLeftAt: participant?.leftAt ?? null,
-        acceptedAt: participant?.acceptedAt ?? null,
-        isInitiator: call?.initiatorId === row.userId,
-      }),
-    };
+    return { live: row ? await sessionLive(ctx, row) : false };
   },
 });
 
@@ -149,6 +138,6 @@ export async function pruneExpiredHandoffs(ctx: MutationCtx): Promise<void> {
   const now = Date.now();
   const rows = await ctx.db.query("screenShareHandoffs").take(50);
   for (const row of rows) {
-    if (row.consumedAt != null || row.expiresAt <= now) await ctx.db.delete(row._id);
+    if (await shouldPrune(ctx, row, now)) await ctx.db.delete(row._id);
   }
 }

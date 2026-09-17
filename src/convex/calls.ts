@@ -128,6 +128,9 @@ export const details = query({
     if (!me) return null;
     const call = await ctx.db.get(args.callId);
     if (!call) return null;
+    const callerMembership = await ctx.db.query("callParticipants")
+      .withIndex("by_call_user", (q) => q.eq("callId", args.callId).eq("userId", me)).first();
+    if (!callerMembership) return null;
     const participants = await participantsOf(ctx, args.callId);
     // Per-member mute state (from their conversationMembership row) so call
     // push can skip people who muted this conversation.

@@ -245,6 +245,7 @@ export const startDM = mutation({
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
     if (me === args.otherId) throw new Error("self");
+    if (!await ctx.db.get(args.otherId)) throw new Error("user_not_found");
 
     const both = [me, args.otherId].sort();
     const dmCandidates = await ctx.db

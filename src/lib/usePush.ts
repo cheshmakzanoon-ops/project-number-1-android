@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAction, useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
 
@@ -12,81 +12,89 @@ function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   return arr;
 }
 
-/**
- * Registers this device for Web Push so incoming calls ring even when the
- * app/tab is fully closed: the OS shows a system notification and plays the
- * phone's own default notification sound (a web app cannot override that
- * sound — which is the desired behavior).
- */
-export function usePush(token: string | null): {
-  notifPerm: NotificationPermission | "unsupported";
-  enable: () => Promise<void>;
-  subscribing: boolean;
-} {
+function supported(): boolean {
+  return typeof Notification !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
+}
+
+async function deadline<T>(promise: Promise<T>, ms = 12_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("push_timeout")), ms);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+export function usePush(token: string | null) {
   const getVapid = useAction(api.push.vapidPublicKey);
   const save = useMutation(api.pushSubs.saveSubscription);
-
-  const [notifPerm, setNotifPerm] = useState<NotificationPermission | "unsupported">(() =>
-    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
-  );
+  const [notifPerm, setNotifPerm] = useState<NotificationPermission | "unsupported">(
+    () => supported() ? Notification.permission : "unsupported");
   const [subscribing, setSubscribing] = useState(false);
+  const [registered, setRegistered] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef<Promise<void> | null>(null);
 
-  const subscribeNow = useCallback(async () => {
-    // Web Push needs the service worker + a real VAPID endpoint, which only
-    // exist in the deployed app; skip in the dev preview to avoid a hang.
-    if (!import.meta.env.PROD) return;
-    if (!token || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
-    try {
+  const subscribeNow = useCallback((): Promise<void> => {
+    if (inFlight.current) return inFlight.current;
+    if (!token || !supported() || Notification.permission !== "granted") return Promise.resolve();
+    const run = async () => {
       setSubscribing(true);
-      const vapid = await getVapid();
-      if (!vapid) return;
-      const reg = await navigator.serviceWorker.ready;
-      const existing = await reg.pushManager.getSubscription();
-      const sub =
-        existing ??
-        (await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(vapid),
-        }));
-      const j = sub.toJSON();
-      if (j.endpoint && j.keys?.p256dh && j.keys?.auth) {
-        await save({ token, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth });
-      }
-    } catch {
-      /* subscription failures never block the app */
-    } finally {
-      setSubscribing(false);
-    }
-  }, [getVapid, save, token]);
-
-  // If the user already granted notifications (e.g. re-opened the app after a
-  // reinstall), (re-)register silently.
-  useEffect(() => {
-    if (notifPerm === "granted") void subscribeNow();
-  }, [notifPerm, subscribeNow]);
-
-  // Browsers occasionally rotate push subscriptions server-side
-  // (pushsubscriptionchange) — if we don't re-subscribe, the old endpoint
-  // dies and the device silently stops ringing even though permission is
-  // still granted. Re-create the subscription whenever that happens.
-  useEffect(() => {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
-    const onSubChange = () => {
-      if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        void subscribeNow();
-      }
+      setError(null);
+      try {
+        const vapid = await deadline(getVapid());
+        if (!vapid) throw new Error("push_not_configured");
+        const key = urlBase64ToUint8Array(vapid);
+        const reg = await deadline(navigator.serviceWorker.ready);
+        let sub = await deadline(reg.pushManager.getSubscription());
+        const old = sub?.options.applicationServerKey;
+        if (sub && old && Array.from(new Uint8Array(old)).join() !== Array.from(key).join()) {
+          if (!await deadline(sub.unsubscribe())) throw new Error("push_key_rotation_failed");
+          sub = null;
+        }
+        sub ??= await deadline(reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+        const j = sub.toJSON();
+        if (!j.endpoint || !j.keys?.p256dh || !j.keys?.auth) throw new Error("invalid_subscription");
+        await deadline(save({ token, endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }));
+        setRegistered(true);
+      } catch {
+        setRegistered(false);
+        setError("زنگ تماس در پس‌زمینه فعال نشد. اتصال را بررسی کن و دوباره تلاش کن؛ فعلاً اپ را باز نگه دار.");
+      } finally { setSubscribing(false); inFlight.current = null; }
     };
-    navigator.serviceWorker.addEventListener("pushsubscriptionchange", onSubChange);
-    return () => navigator.serviceWorker.removeEventListener("pushsubscriptionchange", onSubChange);
+    inFlight.current = run();
+    return inFlight.current;
+  }, [token, getVapid, save]);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (!supported()) return;
+      setNotifPerm(Notification.permission);
+      if (Notification.permission === "granted") void subscribeNow();
+      else setRegistered(false);
+    };
+    const visible = () => { if (document.visibilityState === "visible") refresh(); };
+    const message = (event: MessageEvent) => {
+      if (event.data?.type === "push-subscription-changed") refresh();
+    };
+    refresh();
+    window.addEventListener("online", refresh);
+    document.addEventListener("visibilitychange", visible);
+    navigator.serviceWorker?.addEventListener("message", message);
+    return () => {
+      window.removeEventListener("online", refresh);
+      document.removeEventListener("visibilitychange", visible);
+      navigator.serviceWorker?.removeEventListener("message", message);
+    };
   }, [subscribeNow]);
 
   const enable = useCallback(async () => {
-    if (typeof Notification === "undefined") return;
-    let perm = Notification.permission;
-    if (perm === "default") perm = await Notification.requestPermission();
-    setNotifPerm(perm);
-    if (perm === "granted") await subscribeNow();
+    if (!supported()) return;
+    try {
+      const perm = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+      setNotifPerm(perm);
+      if (perm === "granted") await subscribeNow();
+    } catch { setError("مرورگر اجازهٔ اعلان نداد؛ تنظیمات اعلان این سایت را بررسی کن."); }
   }, [subscribeNow]);
-
-  return { notifPerm, enable, subscribing };
+  return { notifPerm, enable, subscribing, registered, error };
 }

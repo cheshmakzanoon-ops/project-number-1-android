@@ -1,16 +1,14 @@
 const KEY = "garma.device.token";
+let sessionToken: string | undefined;
 
 export function getDeviceToken(): string {
-  const existing = localStorage.getItem(KEY);
-  if (existing) return existing;
-  // no crypto available? fall back to random
-  let id = existing ?? "";
-  const c: Crypto | undefined = (globalThis as { crypto?: Crypto }).crypto;
-  if (c && c.randomUUID) {
-    id = c.randomUUID();
-  } else {
-    id = "tok-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-  }
-  localStorage.setItem(KEY, id);
-  return id;
+  if (sessionToken) return sessionToken;
+  try {
+    const saved = localStorage.getItem(KEY);
+    if (saved) return (sessionToken = saved);
+  } catch { /* private/restricted storage: keep identity for this page session */ }
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  sessionToken = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  try { localStorage.setItem(KEY, sessionToken); } catch { /* in-memory session */ }
+  return sessionToken;
 }

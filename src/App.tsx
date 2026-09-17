@@ -63,6 +63,7 @@ export function App() {
   const [active, setActive] = useState<ActiveChat | null>(null);
   const [busy, setBusy] = useState(false);
   const [authErr, setAuthErr] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
   const [connTrouble, setConnTrouble] = useState(false);
   const [tab, setTab] = useState<LobbyTab>("chats");
@@ -73,7 +74,7 @@ export function App() {
   // "زنگ تماس" (notification) banner — hidden for this session after dismiss.
   const [notifDismissed, setNotifDismissed] = useState(false);
   const callkit = useCallkit(token);
-  const push = usePush(token);
+  const push = usePush(me ? token : null);
   const { session } = callkit;
 
   // ---- Incoming-call notification actions (پاسخ / رد) --------------------
@@ -186,7 +187,7 @@ export function App() {
   // moment the tab becomes visible again or the network returns.
   useEffect(() => {
     if (!me) return;
-    const beat = () => heartbeat({ token });
+    const beat = () => { void heartbeat({ token }).catch(() => {}); };
     beat();
     const id = window.setInterval(beat, 20_000);
     const onVisible = () => {
@@ -238,7 +239,7 @@ export function App() {
           [{ userId: c._id, displayName: c.displayName, themeColor: c.themeColor }],
         );
       } catch {
-        /* noop */
+        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
     [openConv, startDM, token],
@@ -253,7 +254,7 @@ export function App() {
         ];
         await callkit.startCall(cid, kind, peers);
       } catch {
-        /* noop */
+        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
     [callkit, startDM, token],
@@ -286,7 +287,7 @@ export function App() {
         const color = members[0]?.themeColor ?? "#8a6340";
         openConv(cid, "group", name, color, members);
       } catch {
-        /* noop */
+        setActionError("عملیات انجام نشد؛ اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       }
     },
     [openConv, startGroup, token],
@@ -338,7 +339,7 @@ export function App() {
     !notifDismissed &&
     me &&
     "Notification" in window &&
-    push.notifPerm === "default";
+    (push.notifPerm === "default" || (push.notifPerm === "granted" && !push.registered));
 
   // Minimized call pill title/avatar.
   let pillName = "";
@@ -367,6 +368,9 @@ export function App() {
       style={{ background: "var(--color-dusk-50)" }}
     >
       <InstallBanner />
+      {actionError && <div role="alert" className="m-3 rounded-xl bg-rose-500/15 p-3 text-sm">
+        {actionError}<button type="button" onClick={() => setActionError(null)} className="mr-3 underline">بستن</button>
+      </div>}
       {/* Only inside an embedded frame (the dev preview) — a top-level tab or
           an installed app never sees this. Camera/mic/screen capture need a
           real tab, so offer to open one before the user taps call. */}
@@ -418,7 +422,7 @@ export function App() {
           <div className="min-w-0 flex-1">
             <p className="text-[13px] font-extrabold text-dusk-950">زنگ تماس را روشن کن</p>
             <p className="mt-0.5 text-[11px] leading-5 text-dusk-600">
-              اگر اپ بسته باشد هم با این اجازه، تماس‌ها زنگ می‌زند و لرزش دارد.
+              {push.error ?? "برای دریافت اعلان تماس وقتی اپ بسته است، اجازهٔ اعلان را بده. تحویل اعلان به تنظیمات گوشی و اتصال بستگی دارد."}
             </p>
           </div>
           <button
@@ -426,10 +430,11 @@ export function App() {
             onClick={() => {
               void push.enable();
             }}
+            disabled={push.subscribing}
             className="flex shrink-0 items-center gap-1.5 rounded-full bg-sage-600 px-3.5 py-2 text-xs font-extrabold text-white shadow-md shadow-sage-600/30 transition hover:bg-sage-500 active:scale-95"
           >
             <Bell size={14} strokeWidth={2.5} />
-            روشن کن
+            {push.subscribing ? "در حال فعال‌سازی…" : "روشن کن"}
           </button>
           <button
             type="button"
@@ -445,6 +450,7 @@ export function App() {
       <div className="flex min-h-0 flex-1 flex-col">
         {active ? (
           <Chat
+            key={`${active.cid}:${token}`}
             token={token}
             meColor={identity.themeColor}
             meName={identity.displayName}

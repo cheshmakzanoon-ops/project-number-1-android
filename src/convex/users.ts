@@ -130,6 +130,7 @@ export const directory = query({
   args: { token: v.optional(v.string()) },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
+    if (!me) return [];
     const all = await ctx.db.query("users").order("asc").collect();
     const now = Date.now();
     return all
