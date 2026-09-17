@@ -1,4 +1,4 @@
-name: Apply tested draft and lifecycle repair
+name: Apply tested status and audio-call repair
 on:
   push:
     branches: [main]
@@ -22,12 +22,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/git/blobs/8d551e19302a2df2be1823d99461ca8fc93ae08a" --jq .content | base64 --decode > "$RUNNER_TEMP/repair.xz"
+          gh api "repos/$GITHUB_REPOSITORY/git/blobs/ec1f2f14e690a5a5b1b47c8f56bc3015b6944533" --jq .content | base64 --decode > "$RUNNER_TEMP/repair.xz"
           python3 - <<'PY'
           import pathlib, os, lzma, hashlib
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
           patch = lzma.decompress((root / 'repair.xz').read_bytes())
-          assert hashlib.sha256(patch).hexdigest() == 'eb09a87d5b6f520b596a5ac7a1790d655c009e94d7f15335d6729280ec6dd46e'
+          assert hashlib.sha256(patch).hexdigest() == 'dcfc209a6f9b3cae2c64e33643441f02115af83b22244ca5ee432bdb2bf22907'
           (root / 'repair.patch').write_bytes(patch)
           PY
           git apply --check --index "$RUNNER_TEMP/repair.patch"
@@ -43,14 +43,14 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: preserve drafts and bound stale navigation and call startup' -m 'Preserve compose text across attachment cancellation and editing, serialize image preparation, pin ambiguous media retries to their original payload, and invalidate stale contact intents. Bound registration, SDK loading and playback unlock without allowing late callbacks to resurrect calls. Add 21 regression cases; 299 tests, types and production build pass before push.'
+          git commit -m 'fix: add direct audio calling and make status operations lifecycle-safe' -m 'Offer audio-only calls from direct chats, releasing the voice recorder first. Bound status posting, image preparation, authorization and deletion; ignore stale identity/viewer continuations, preserve failed drafts, correct image-caption limits, and pause hidden stories. Reject unauthorized deletion rather than reporting false success. All 312 regressions, types and production build pass before push.'
           git push origin HEAD:main
           git rev-parse HEAD > verified-commit.txt
           git archive --format=tar HEAD | gzip > source.tar.gz
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
-          name: draft-lifecycle-${{ github.run_id }}
+          name: status-audio-${{ github.run_id }}
           path: |
             test-results.xml
             verified-commit.txt
