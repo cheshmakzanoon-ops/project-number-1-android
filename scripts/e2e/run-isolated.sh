@@ -13,7 +13,6 @@ TLS="$RUNNER_TEMP/garma-test-tls"
 mkdir -p "$TLS" e2e-results
 cp /etc/hosts "$RUNNER_TEMP/garma-hosts-before"
 cleanup() {
-  # The test owns only these named disposable containers and processes.
   [[ -n "${PROXY_PID:-}" ]] && sudo kill "$PROXY_PID" 2>/dev/null || true
   [[ -n "${MEDIA_PID:-}" ]] && kill "$MEDIA_PID" 2>/dev/null || true
   docker rm -f garma-ci-convex >/dev/null 2>&1 || true
@@ -22,9 +21,11 @@ cleanup() {
 }
 trap cleanup EXIT
 printf '\n127.0.0.1 %s %s garma-ci.test garma-ci-media.test\n' "$CLOUD_HOST" "$SITE_HOST" | sudo tee -a /etc/hosts >/dev/null
-# Revision-addressed official self-hosted backend, not a moving :latest tag.
-IMAGE='ghcr.io/get-convex/convex-backend:71c30c7450fc224c297c228fed4b342669e95dd0'
+# Resolve the official published image once; run and record its immutable digest.
+IMAGE='ghcr.io/get-convex/convex-backend:latest'
 docker pull "$IMAGE"
+IMAGE="$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')"
+printf '%s\n' "$IMAGE" | tee e2e-results/backend-image.txt
 docker run -d --name garma-ci-convex -p 127.0.0.1:3210:3210 -p 127.0.0.1:3211:3211 \
   -e CONVEX_CLOUD_ORIGIN="https://$CLOUD_HOST" -e CONVEX_SITE_ORIGIN="https://$SITE_HOST" \
   -e DISABLE_BEACON=true -e DISABLE_METRICS_ENDPOINT=true "$IMAGE"
@@ -36,7 +37,6 @@ curl -fsS http://127.0.0.1:3210/version >/dev/null
 CONVEX_SELF_HOSTED_ADMIN_KEY="$(docker exec garma-ci-convex ./generate_admin_key.sh)"
 export CONVEX_SELF_HOSTED_ADMIN_KEY
 echo "::add-mask::$CONVEX_SELF_HOSTED_ADMIN_KEY"
-# Test-only keys, generated inside a throwaway backend; no family accounts touched.
 cat > "$RUNNER_TEMP/garma-test-env" <<'ENV'
 GARMA_FAMILY_INVITE_CODE=garma-isolated-browser-test-invitation-2026
 GARMA_ALLOWED_ORIGINS=https://garma-ci.test
@@ -46,7 +46,6 @@ LIVEKIT_API_SECRET=secret
 ENV
 chmod 600 "$RUNNER_TEMP/garma-test-env"
 bunx convex env set --from-file "$RUNNER_TEMP/garma-test-env"
-# Real bundling and runtime registration, not convex-test's emulation.
 bunx convex deploy --yes --typecheck enable --codegen enable
 bun run build
 npm install --prefix "$E2E_TOOLS" --ignore-scripts --no-audit --no-fund playwright@1.63.0
