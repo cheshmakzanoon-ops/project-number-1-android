@@ -24,6 +24,7 @@ import {
 import { Avatar } from "./Avatar";
 import { ImageBubble, ReplyChip, VoiceNoteBubble } from "./MessageMedia";
 import { Lightbox } from "./Lightbox";
+import { MessageActions } from "./MessageActions";
 import { clock, fa, formatDay, relative } from "../lib/format";
 import { loadDraft, newClientMsgId, saveDraft } from "../lib/outbox";
 import { useMessageOutbox } from "../lib/useMessageOutbox";
@@ -1258,6 +1259,7 @@ function Bubble({
 }) {
   const mine = msg.isMine;
   const isMenu = menu === msg._id;
+  const anchor = useRef<HTMLDivElement>(null);
   const kind = msg.kind ?? "text";
   const deleted = !!msg.deletedAt;
   void meName;
@@ -1284,14 +1286,20 @@ function Bubble({
 
   return (
     <div className={`flex ${mine ? "justify-end" : "justify-start"}`}>
-      {isMenu && (
-        <div className="fixed inset-0 z-10" onClick={(e) => { e.stopPropagation(); setMenu(null); }} aria-hidden="true" />
-      )}
       <div className={`flex max-w-[84%] flex-col ${mine ? "items-end" : "items-start"}`}>
         <div
+          ref={anchor}
+          tabIndex={deleted ? undefined : 0}
+          aria-label={deleted ? undefined : "گزینه‌های پیام"}
+          aria-expanded={deleted ? undefined : isMenu}
+          onKeyDown={event => {
+            if (event.target === event.currentTarget && !deleted && ["Enter", " "].includes(event.key)) {
+              event.preventDefault(); setMenu(isMenu ? null : msg._id);
+            }
+          }}
           onClick={(e) => {
             e.stopPropagation();
-            setMenu(isMenu ? null : msg._id);
+            if (!deleted) setMenu(isMenu ? null : msg._id);
           }}
           className={`relative select-none rounded-[20px] shadow-sm transition active:scale-[0.99] ${
             mine ? "rounded-br-md text-white shadow-md shadow-dusk-900/15" : "rounded-bl-md bg-dusk-100 text-dusk-950 shadow-[0_1px_3px_rgba(0,0,0,0.35)] ring-1 ring-dusk-300/50"
@@ -1349,12 +1357,7 @@ function Bubble({
           )}
 
           {isMenu && !deleted && (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className={`animate-rise absolute bottom-full z-20 mb-2 flex items-center gap-1 rounded-2xl border border-ember-300/25 bg-dusk-100 p-1.5 shadow-xl shadow-black/60 ${
-                mine ? "right-0" : "left-0"
-              }`}
-            >
+            <MessageActions anchor={anchor} alignEnd={mine} onClose={() => setMenu(null)}>
               {EMOJIS.map((e) => (
                 <button
                   key={e}
@@ -1390,7 +1393,7 @@ function Bubble({
                   <Trash2 size={16} />
                 </button>
               )}
-            </div>
+            </MessageActions>
           )}
         </div>
       </div>
