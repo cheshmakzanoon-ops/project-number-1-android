@@ -64,6 +64,12 @@ async function resolveConvexUrl(): Promise<string> {
   return CONVEX_URL;
 }
 
+// External fonts stay optional, asynchronous, and compatible with script-src self.
+for (const link of document.querySelectorAll<HTMLLinkElement>('link[data-async-font]')) {
+  if (link.sheet) link.media = "all";
+  else link.addEventListener("load", () => { link.media = "all"; }, { once: true });
+}
+
 // Resolved once per page load and reused across StrictMode double-effects.
 let convexUrlPromise: Promise<string> | null = null;
 function getConvexUrl(): Promise<string> {
@@ -93,17 +99,22 @@ if ("serviceWorker" in navigator) {
 /** Boots the Convex client only after the backend URL is actually known. */
 function Root() {
   const [client, setClient] = useState<ConvexReactClient | null>(null);
+  const [bootFailed, setBootFailed] = useState(false);
   useEffect(() => {
     let mounted = true;
+    let ownedClient: ConvexReactClient | null = null;
     void getConvexUrl().then((url) => {
       if (!mounted) return;
-      setClient(new ConvexReactClient(url));
-    });
+      ownedClient = new ConvexReactClient(url);
+      setClient(ownedClient);
+    }).catch(() => { if (mounted) setBootFailed(true); });
     return () => {
       mounted = false;
+      void ownedClient?.close();
     };
   }, []);
 
+  if (bootFailed) throw new Error("backend_client_start_failed");
   if (!client) {
     // Brief warm-up splash (theme base #1a1008). The app's own loading pulse
     // takes over the moment the client is ready.

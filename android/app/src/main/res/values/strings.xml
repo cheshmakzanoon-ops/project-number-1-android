@@ -8,4 +8,5 @@
     <string name="notification_title">در حال فرستادن صفحه</string>
     <string name="notification_text">صفحهٔ گوشی تو در تماس گرما به‌اشتراک گذاشته شده است</string>
     <string name="notification_stop">پایان اشتراک</string>
+    <string name="status_message">%1$s\n%2$s</string>
 </resources>

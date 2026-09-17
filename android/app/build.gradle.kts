@@ -3,6 +3,20 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val signingPath = providers.environmentVariable("GARMA_ANDROID_KEYSTORE").orNull
+val signingPassword = providers.environmentVariable("GARMA_ANDROID_STORE_PASSWORD").orNull
+val signingAlias = providers.environmentVariable("GARMA_ANDROID_KEY_ALIAS").orNull
+val signingKeyPassword = providers.environmentVariable("GARMA_ANDROID_KEY_PASSWORD").orNull
+val hasReleaseSigning = listOf(signingPath, signingPassword, signingAlias, signingKeyPassword).all { !it.isNullOrBlank() }
+val packagingRelease = gradle.startParameter.taskNames.any {
+    val name = it.substringAfterLast(':').lowercase()
+    (name.contains("release") && listOf("assemble", "bundle", "package", "install", "publish").any(name::startsWith)) ||
+        name in listOf("build", "assemble", "bundle")
+}
+if (packagingRelease && !hasReleaseSigning) {
+    throw GradleException("Release signing is required: configure GARMA_ANDROID_KEYSTORE, STORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD. Debug keys are not release keys.")
+}
+
 android {
     namespace = "com.garma.screenshare"
     compileSdk = 35
@@ -11,8 +25,8 @@ android {
         applicationId = "com.garma.screenshare"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         // The ONE Convex deployment this companion talks to. It is baked into
         // the build on purpose: the deep link must never be able to point the
@@ -30,8 +44,19 @@ android {
         buildConfig = true
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("production") {
+                storeFile = file(requireNotNull(signingPath))
+                storePassword = signingPassword
+                keyAlias = signingAlias
+                keyPassword = signingKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("production")
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

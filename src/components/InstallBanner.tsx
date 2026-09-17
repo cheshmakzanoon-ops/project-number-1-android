@@ -39,7 +39,7 @@ export function InstallBanner() {
           <>
             <p className="text-[13px] font-extrabold text-dusk-950">گرما را روی گوشی‌ات نصب کن</p>
             <p className="mt-0.5 truncate text-[11px] leading-5 text-dusk-600">
-              مثل یک اپ واقعی؛ سریع‌تر باز می‌شود و تماس‌ها حتی وقتی بسته است زنگ می‌زند
+              دسترسی سریع‌تر؛ برای زنگ تماس در پس‌زمینه، اعلان‌ها را هم فعال کن
             </p>
           </>
         )}

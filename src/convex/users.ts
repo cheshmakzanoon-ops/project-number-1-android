@@ -1,7 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { hashToken, userIdFromToken, publicUser } from "./auth";
-import { api } from "./_generated/api";
+import { hashToken, userIdFromToken, publicUser, validNewToken, migrateSession } from "./auth";
+import { MAX_FAMILY_USERS, requireFamilyInvite, familyInviteCode } from "./policy";
 import type { Id } from "./_generated/dataModel";
 
 const PALETTE = [
@@ -30,16 +30,21 @@ export const register = mutation({
     token: v.string(),
     displayName: v.string(),
     whoami: v.optional(v.string()),
+    inviteCode: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await userIdFromToken(ctx, args.token);
     if (existing) {
-      // Device already has an identity.
+      await migrateSession(ctx, args.token);
+      // Device already has an identity; do not require another invitation.
       const u = await ctx.db.get(existing);
       if (!u) throw new Error("no_user");
       return { user: publicUser(u), isNew: false };
     }
 
+    if (!validNewToken(args.token)) throw new Error("invalid_device_token");
+    await requireFamilyInvite(args.inviteCode);
+    if ((await ctx.db.query("users").take(MAX_FAMILY_USERS)).length >= MAX_FAMILY_USERS) throw new Error("family_full");
     const name = args.displayName.trim().slice(0, 40);
     if (!name) throw new Error("name_required");
 
@@ -71,7 +76,7 @@ export const register = mutation({
 
     await ctx.db.insert("sessions", {
       userId,
-      tokenHash: hashToken(args.token),
+      tokenHash: await hashToken(args.token),
       createdAt: now,
     });
 
@@ -101,25 +106,13 @@ export const heartbeat = mutation({
     const u = await ctx.db.get(userId);
     if (!u) return;
     const now = Date.now();
+    await migrateSession(ctx, args.token);
     // Skip redundant writes: clients beat every ~20s, and anything fresher
     // than 15s is already a live presence — this roughly halves the writes
     // every open device generates.
     if (now - u.lastSeenAt < 15_000) return;
     await ctx.db.patch(userId, { lastSeenAt: now });
-    // Opportunistic housekeeping is deliberately fire-and-forget: a transient
-    // failure here (mid-deploy, missing function, internal error) must NEVER
-    // surface to the client or poison the heartbeat — presence is what keeps
-    // the app alive on weak links.
-    try {
-      await ctx.scheduler.runAfter(0, api.calls.cleanupStale, { token: args.token });
-    } catch {
-      /* noop */
-    }
-    try {
-      await ctx.scheduler.runAfter(0, api.statuses.cleanupExpired, { token: args.token });
-    } catch {
-      /* noop */
-    }
+
   },
 });
 
@@ -152,3 +145,12 @@ function slugify(s: string): string {
     .replace(/[^a-z0-9-]/g, "")
     .slice(0, 24);
 }
+
+/** Only an authenticated family member may create a shareable invitation. */
+export const familyInvite = query({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    if (!await userIdFromToken(ctx, args.token)) throw new Error("unauthorized");
+    return familyInviteCode();
+  },
+});

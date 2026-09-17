@@ -1,6 +1,8 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { mediaEndpoint, rateLimit } from "./policy";
+import { requireOwnedMedia } from "./uploads";
 import { deleteUnreferencedStorage } from "./storageCleanup";
 import type { Doc, Id } from "./_generated/dataModel";
 
@@ -299,6 +301,9 @@ export const send = mutation({
       }
     }
 
+    if (kind === "text" && args.storageId) throw new Error("invalid_media_type");
+    const mimeType = kind !== "text" ? await requireOwnedMedia(ctx, me, args.storageId!, kind) : undefined;
+    await rateLimit(ctx, me, "message", 60);
     const now = Date.now();
     const messageId = await ctx.db.insert("messages", {
       conversationId: args.conversationId,
@@ -308,7 +313,7 @@ export const send = mutation({
       clientMessageId: args.clientMessageId,
       kind,
       storageId: args.storageId,
-      mimeType: args.mimeType,
+      mimeType,
       durationMs: args.durationMs ? Math.min(Math.round(args.durationMs), 5 * 60_000) : undefined,
       replyToId,
     });
@@ -319,13 +324,13 @@ export const send = mutation({
   },
 });
 
-/** Client-side upload entry point: mints a signed Convex storage URL. */
+/** Return the authenticated, bounded HTTP upload endpoint. */
 export const uploadUrl = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
-    return await ctx.storage.generateUploadUrl();
+    return mediaEndpoint();
   },
 });
 
@@ -335,9 +340,11 @@ export const edit = mutation({
     const me = await userIdFromToken(ctx, args.token);
     const msg = await ctx.db.get(args.messageId);
     if (!me || !msg || msg.senderId !== me) throw new Error("unauthorized");
+    if (!await membershipOf(ctx, msg.conversationId, me)) throw new Error("not_member");
     const text = args.body.trim();
-    if (!text || msg.deletedAt) throw new Error("invalid");
-    await ctx.db.patch(args.messageId, { body: text.slice(0, 4000), editedAt: Date.now() });
+    if (!text || msg.deletedAt || msg.kind === "voice") throw new Error("invalid");
+    if (text.length > (msg.kind === "image" ? 1000 : 4000)) throw new Error("message_too_long");
+    await ctx.db.patch(args.messageId, { body: text, editedAt: Date.now() });
   },
 });
 

@@ -1,4 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useConvex } from "convex/react";
+import { api } from "../convex/_generated/api";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Check,
@@ -14,6 +16,7 @@ import { fa } from "../lib/format";
 import type { DirectoryEntry } from "../lib/types";
 
 export function ContactSheet({
+  token,
   open,
   onClose,
   contacts,
@@ -23,6 +26,7 @@ export function ContactSheet({
   onAudio,
   onGroupCreate,
 }: {
+  token: string;
   open: boolean;
   onClose: () => void;
   contacts: DirectoryEntry[];
@@ -35,12 +39,23 @@ export function ContactSheet({
   const [mode, setMode] = useState<"dm" | "group">("dm");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
+  const [copying, setCopying] = useState(false);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const client = useConvex();
+  const mounted = useRef(false);
+  const copyInFlight = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2200);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
 
   const togglePick = (id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
-      else next.add(id);
+      else if (next.size < 7) next.add(id);
       return next;
     });
   };
@@ -70,32 +85,39 @@ export function ContactSheet({
     onGroupCreate(picked);
   };
 
-  const copyInvite = () => {
-    const url = window.location.origin;
-    const done = () => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2200);
-    };
-    const fallback = () => {
-      try {
+  const copyInvite = async () => {
+    if (copyInFlight.current) return;
+    copyInFlight.current = true;
+    setCopying(true);
+    setCopyError(null);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const code = await Promise.race([client.query(api.users.familyInvite, { token }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timeout")), 12000); })]);
+      if (!/^[A-Za-z0-9_-]{32,128}$/.test(code)) throw new Error("invalid_invite");
+      const url = window.location.origin + "/#invite=" + encodeURIComponent(code);
+      let didCopy = false;
+      try { await navigator.clipboard.writeText(url); didCopy = true; } catch { /* fallback below */ }
+      if (!didCopy) {
         const ta = document.createElement("textarea");
-        ta.value = url;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-        done();
-      } catch {
-        /* clipboard unavailable */
+        try {
+          ta.value = url;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          didCopy = document.execCommand("copy");
+        } finally { ta.remove(); }
       }
-    };
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(url).then(done, fallback);
-    } else {
-      fallback();
+      if (!didCopy) throw new Error("clipboard_failed");
+      if (mounted.current) setCopied(true);
+    } catch {
+      if (mounted.current) setCopyError("پیوند کپی نشد؛ اتصال و اجازهٔ کلیپ‌بورد را بررسی کن و دوباره تلاش کن.");
+    } finally {
+      clearTimeout(timer);
+      copyInFlight.current = false;
+      if (mounted.current) setCopying(false);
     }
   };
 
@@ -158,7 +180,7 @@ export function ContactSheet({
               {mode === "group"
                 ? contacts.length === 0
                   ? "هنوز کسی ثبت نام نکرده. پیوند را پخش کن تا بقیهٔ خانواده بیایند."
-                  : "حداقل دو نفر را انتخاب کن تا گفتگو و تماس گروهی ساخته شود."
+                  : "دو تا هفت نفر را انتخاب کن تا گفتگو و تماس گروهی ساخته شود."
                 : contacts.length === 0
                   ? "هنوز کسی ثبت نام نکرده. پیوند را پخش کن تا بقیهٔ خانواده بیایند."
                   : "با یک نفر تماس بگیر یا پیام بده."}
@@ -166,7 +188,8 @@ export function ContactSheet({
 
             <button
               type="button"
-              onClick={copyInvite}
+              onClick={() => { void copyInvite(); }}
+              disabled={copying}
               className={`mx-6 mb-3 flex items-center justify-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-bold transition active:scale-[0.98] ${
                 copied
                   ? "border border-sage-300 bg-sage-50 text-sage-700"
@@ -180,11 +203,13 @@ export function ContactSheet({
                 </>
               ) : (
                 <>
-                  <Link size={16} /> کپی پیوند دعوت خانواده
+                  <Link size={16} /> {copying ? "در حال ساخت پیوند…" : "کپی پیوند دعوت خانواده"}
                 </>
               )}
             </button>
 
+            {copyError && <p role="alert" className="mx-6 mb-3 text-sm text-rose-300">{copyError}</p>}
+            <p className="mx-6 mb-3 text-xs leading-5 text-dusk-600">پیوند دعوت اجازهٔ ورود می‌دهد؛ فقط برای اعضای خانواده بفرست.</p>
             <div className="mb-2 max-h-[46vh] overflow-y-auto px-3 pb-4">
               {contacts.map((c) => {
                 const isPicked = selected.has(c._id);

@@ -1,6 +1,7 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { rateLimit } from "./policy";
 import { pruneExpiredHandoffs } from "./screenShare";
 import type { Id } from "./_generated/dataModel";
 
@@ -75,16 +76,21 @@ export const start = mutation({
     // genuinely still present blocks a new call.
     const myRows = await ctx.db
       .query("callParticipants")
-      .withIndex("by_user", (q) => q.eq("userId", me))
-      .collect();
+      .withIndex("by_user_left", (q) => q.eq("userId", me).eq("leftAt", undefined))
+      .take(100);
     for (const p of myRows) {
       if (p.leftAt) continue;
       const live = await ctx.db.get(p.callId);
+      if (live?.status === "ringing" && Date.now() - live.startedAt >= 75_000) {
+        await retireCall(ctx, live._id, "missed");
+        continue;
+      }
       if (live && (live.status === "ringing" || live.status === "active")) {
         throw new Error("already_in_call");
       }
     }
 
+    await rateLimit(ctx, me, "call-start", 6);
     const now = Date.now();
     const members = await ctx.db
       .query("conversationMembers")
@@ -182,8 +188,8 @@ export const myCalls = query({
 
     const parts = await ctx.db
       .query("callParticipants")
-      .withIndex("by_user", (q) => q.eq("userId", me))
-      .collect();
+      .withIndex("by_user_left", (q) => q.eq("userId", me).eq("leftAt", undefined))
+      .take(100);
 
     const now = Date.now();
 
@@ -278,12 +284,13 @@ export const recent = query({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return [];
-    const n = Math.min(Math.max(args.limit ?? 60, 1), 200);
+    const n = args.limit ?? 60;
+    if (!Number.isInteger(n) || n < 1 || n > 200) throw new Error("invalid_limit");
 
     const parts = await ctx.db
       .query("callParticipants")
       .withIndex("by_user", (q) => q.eq("userId", me))
-      .collect();
+      .order("desc").take(400);
     const finished: Array<{
       call: { _id: Id<"calls">; conversationId: Id<"conversations">; kind: "audio" | "video"; status: string; initiatorId: Id<"users">; startedAt: number; endedAt?: number };
     }> = [];
@@ -394,10 +401,26 @@ export const answer = mutation({
       .withIndex("by_call_user", (q) => q.eq("callId", args.callId).eq("userId", me))
       .first();
     if (!myRow || myRow.leftAt || myRow.acceptedAt) return;
+    if (call.status === "ringing" && Date.now() - call.startedAt >= 75_000) {
+      await retireCall(ctx, call._id, "missed");
+      return;
+    }
+    const otherRows = await ctx.db.query("callParticipants")
+      .withIndex("by_user_left", q => q.eq("userId", me).eq("leftAt", undefined)).take(100);
+    for (const other of otherRows) {
+      if (other.callId === args.callId) continue;
+      const otherCall = await ctx.db.get(other.callId);
+      if (otherCall?.status === "ringing" && Date.now() - otherCall.startedAt >= 75_000) {
+        await retireCall(ctx, otherCall._id, "missed");
+        continue;
+      }
+      if (otherCall && (otherCall.status === "active" || otherCall.status === "ringing") &&
+          (other.acceptedAt != null || otherCall.initiatorId === me)) throw new Error("already_in_call");
+    }
     const now = Date.now();
     await ctx.db.patch(myRow._id, { acceptedAt: now });
-    if (call.status === "ringing") {
-      // First answer opens the call for everyone; the initiator is already in
+    if (call.status === "ringing" && call.initiatorId !== me) {
+      // First callee answer opens the call for everyone; the initiator is already in
       // the media room, so count them as joined too.
       const initRow = await ctx.db
         .query("callParticipants")
@@ -441,7 +464,7 @@ export const end = mutation({
     if (!me) return;
     const call = await ctx.db.get(args.callId);
     if (!call) return;
-    if (call.status === "ended") return;
+    if (call.status !== "ringing" && call.status !== "active") return;
     const wanted = args.status ?? "ended";
     const rows = await participantsOf(ctx, args.callId);
     const myRow = rows.find((r) => r.userId === me);
@@ -493,14 +516,13 @@ export const ackSignals = mutation({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
+    if (!Number.isFinite(args.cutoff)) throw new Error("invalid_cutoff");
     const mine = await ctx.db
       .query("callSignals")
       .withIndex("by_call_to", (q) => q.eq("callId", args.callId).eq("toUserId", me))
       .filter((q) => q.lte(q.field("createdAt"), args.cutoff))
-      .collect();
-    for (const s of mine) {
-      if (!s.deliveredAt) await ctx.db.patch(s._id, { deliveredAt: Date.now() });
-    }
+      .take(100);
+    for (const signal of mine) await ctx.db.delete(signal._id);
   },
 });
 
@@ -515,7 +537,7 @@ export const pendingSignals = query({
       .withIndex("by_call_to", (q) => q.eq("callId", args.callId).eq("toUserId", me))
       .filter((q) => q.eq(q.field("deliveredAt"), undefined))
       .order("asc")
-      .collect();
+      .take(100);
     return sigs.map((s) => ({
       _id: s._id,
       fromUserId: s.fromUserId,
@@ -548,6 +570,17 @@ export const sendSignal = mutation({
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
     if (me === args.toUserId) return;
+    const call = await ctx.db.get(args.callId);
+    if (!call || (call.status !== "ringing" && call.status !== "active") ||
+        (call.status === "ringing" && Date.now() - call.startedAt >= 75_000)) throw new Error("call_not_live");
+    const rows = await participantsOf(ctx, args.callId);
+    if (!rows.some(row => row.userId === me && row.leftAt == null) ||
+        !rows.some(row => row.userId === args.toUserId && row.leftAt == null)) throw new Error("not_active_participant");
+    if (args.payload && new TextEncoder().encode(args.payload).length > 65_536) throw new Error("signal_too_large");
+    const pending = await ctx.db.query("callSignals").withIndex("by_call_to", q => q.eq("callId", args.callId).eq("toUserId", args.toUserId))
+      .filter(q => q.eq(q.field("deliveredAt"), undefined)).take(100);
+    if (pending.length >= 100) throw new Error("signal_queue_full");
+    await rateLimit(ctx, me, "signal", 120);
     await ctx.db.insert("callSignals", {
       callId: args.callId,
       fromUserId: me,
@@ -569,6 +602,12 @@ export const cleanupStale = mutation({
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
+    await cleanupCalls(ctx);
+  },
+});
+
+/** Bounded background sweep, independent of any family device being open. */
+export async function cleanupCalls(ctx: MutationCtx) {
     const now = Date.now();
 
     // Screen-share handoff codes are one-time and short-lived; sweep the ones
@@ -579,7 +618,7 @@ export const cleanupStale = mutation({
     const staleRings = await ctx.db
       .query("calls")
       .withIndex("by_status", (q) => q.eq("status", "ringing"))
-      .take(20);
+      .take(100);
     for (const call of staleRings) {
       if (now - call.startedAt > 75_000) {
         await retireCall(ctx, call._id, "missed");
@@ -589,16 +628,16 @@ export const cleanupStale = mutation({
     const active = await ctx.db
       .query("calls")
       .withIndex("by_status", (q) => q.eq("status", "active"))
-      .take(10);
+      .take(100);
     for (const call of active) {
       // Fast path: a recent call can't have stale participants yet.
       if (now - call.startedAt < 10 * 60_000) continue;
       const rows = await participantsOf(ctx, call._id);
       const present = rows.filter((r) => !r.leftAt);
-      let everyoneGone = present.length > 0;
+      let everyoneGone = true;
       for (const r of present) {
         const u = await ctx.db.get(r.userId);
-        if (!u || now - u.lastSeenAt < 10 * 60_000) {
+        if (u && now - u.lastSeenAt < 10 * 60_000) {
           everyoneGone = false;
           break;
         }
@@ -607,5 +646,5 @@ export const cleanupStale = mutation({
         await retireCall(ctx, call._id, "ended");
       }
     }
-  },
-});
+
+}

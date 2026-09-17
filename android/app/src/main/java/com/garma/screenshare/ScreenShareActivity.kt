@@ -13,6 +13,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 
 /** Each share requires Android's consent; the service owns the resulting capture. */
@@ -20,6 +21,7 @@ class ScreenShareActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private var handoffCode: String? = null
     private var flowStarted = false
+    private var failureMessage: String? = null
     private val closeActivity = Runnable { finish() }
 
     private val projectionConsent =
@@ -62,6 +64,11 @@ class ScreenShareActivity : AppCompatActivity() {
             setPadding(48, 48, 48, 48)
             addView(status)
         })
+        val restoredFailure = savedInstanceState?.getString("failureMessage")
+        if (restoredFailure != null) {
+            finishWith(restoredFailure)
+            return
+        }
         if (handoffCode == null) {
             finishWith("این برنامه فقط از دکمهٔ «اشتراک صفحه» در تماس گرما باز می‌شود.")
             return
@@ -73,6 +80,7 @@ class ScreenShareActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("handoffCode", handoffCode)
         outState.putBoolean("flowStarted", flowStarted)
+        outState.putString("failureMessage", failureMessage)
         super.onSaveInstanceState(outState)
     }
 
@@ -115,12 +123,14 @@ class ScreenShareActivity : AppCompatActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     private fun hasNotificationPermission(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
 
     private fun finishWith(message: String) {
-        status.text = "${getString(R.string.app_name)}\n$message"
+        failureMessage = message
+        status.text = getString(R.string.status_message, getString(R.string.app_name), message)
         status.removeCallbacks(closeActivity)
         status.postDelayed(closeActivity, 3_500)
     }

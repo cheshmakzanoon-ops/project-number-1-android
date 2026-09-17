@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { putStorageFile, startRecording } from "./media";
+import { putStorageFile, startRecording, TRUSTED_UPLOAD_URL } from "./media";
 
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (reason: Error) => void;
   const promise = new Promise<T>((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
@@ -36,26 +36,26 @@ describe("uploads", () => {
     const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ storageId: "stored-file" }) });
     vi.stubGlobal("fetch", fetch);
     const blob = new Blob(["photo"], { type: "image/jpeg" });
-    expect(await putStorageFile("https://example.test/upload", blob)).toBe("stored-file");
-    expect(fetch).toHaveBeenCalledWith("https://example.test/upload", expect.objectContaining({ method: "POST", body: blob, signal: expect.any(AbortSignal) }));
+    expect(await putStorageFile(TRUSTED_UPLOAD_URL, blob, "a".repeat(64))).toBe("stored-file");
+    expect(fetch).toHaveBeenCalledWith(TRUSTED_UPLOAD_URL, expect.objectContaining({ method: "POST", body: blob, signal: expect.any(AbortSignal) }));
     expect(vi.getTimerCount()).toBe(0);
   });
   it.each([null, {}, {storageId: 7}, {storageId: ""}])("rejects malformed success: %j", async (json) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => json }));
-    await expect(putStorageFile("https://example.test/upload", new Blob(["x"]))).rejects.toThrow("no_storage_id");
+    await expect(putStorageFile(TRUSTED_UPLOAD_URL, new Blob(["x"]), "a".repeat(64))).rejects.toThrow("no_storage_id");
   });
   it("aborts an upload that never completes", async () => {
     vi.stubGlobal("fetch", vi.fn((_url, init) => new Promise((_, reject) => {
       init.signal.addEventListener("abort", () => reject(new Error("aborted")));
     })));
-    const upload = putStorageFile("https://example.test/upload", new Blob(["x"]));
+    const upload = putStorageFile(TRUSTED_UPLOAD_URL, new Blob(["x"]), "a".repeat(64));
     const assertion = expect(upload).rejects.toThrow("aborted");
     await vi.advanceTimersByTimeAsync(120_000); await assertion;
     expect(vi.getTimerCount()).toBe(0);
   });
   it("rejects empty files before making a network request", async () => {
     const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
-    await expect(putStorageFile("https://example.test/upload", new Blob())).rejects.toThrow();
+    await expect(putStorageFile(TRUSTED_UPLOAD_URL, new Blob(), "a".repeat(64))).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled();
   });
 });

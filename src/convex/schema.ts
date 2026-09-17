@@ -2,6 +2,10 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  rateLimits: defineTable({ userId: v.id("users"), scope: v.string(), count: v.number(), resetAt: v.number() })
+    .index("by_user_scope", ["userId", "scope"]).index("by_reset", ["resetAt"]),
+  uploads: defineTable({ mimeType: v.string(), storageId: v.id("_storage"), userId: v.id("users"), createdAt: v.number(), expiresAt: v.optional(v.number()) })
+    .index("by_storage", ["storageId"]).index("by_expiry", ["expiresAt"]),
   users: defineTable({
     username: v.string(), // unique opaque handle (auto-generated)
     displayName: v.string(), // the only thing people enter
@@ -80,6 +84,7 @@ export default defineSchema({
   // seen it (the owner's دیده‌شده list). Cleaned up lazily (see statuses.ts).
   statuses: defineTable({
     userId: v.id("users"),
+    clientPostId: v.optional(v.string()),
     body: v.string(),
     createdAt: v.number(),
     kind: v.optional(v.union(v.literal("text"), v.literal("image"))),
@@ -98,6 +103,7 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_created", ["createdAt"])
+    .index("by_user_client", ["userId", "clientPostId"])
     .index("by_storage", ["storageId"]),
 
   // Web Push subscriptions, one per device that granted notifications.
@@ -133,6 +139,7 @@ export default defineSchema({
     ),
     startedAt: v.number(),
     endedAt: v.optional(v.number()),
+    lastPushAt: v.optional(v.number()),
   })
     .index("by_conversation_active", ["conversationId", "status"])
     .index("by_status", ["status"])
@@ -151,7 +158,8 @@ export default defineSchema({
   })
     .index("by_call", ["callId"])
     .index("by_call_user", ["callId", "userId"])
-    .index("by_user", ["userId"]),
+    .index("by_user", ["userId"])
+    .index("by_user_left", ["userId", "leftAt"]),
 
   // One-time, short-lived screen-share handoff codes. The browser never hands
   // a Convex token, a LiveKit JWT or any room credential to the Android
@@ -194,5 +202,6 @@ export default defineSchema({
   })
     .index("by_call_to", ["callId", "toUserId"])
     .index("by_call_delivered", ["callId", "deliveredAt"])
-    .index("by_to_user", ["toUserId"]),
+    .index("by_to_user", ["toUserId"])
+    .index("by_created", ["createdAt"]),
 });

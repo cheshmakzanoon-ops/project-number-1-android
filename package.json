@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b --noEmit && vite build",
+    "build": "tsc -b --noEmit && vite build && node scripts/finalize-build.mjs",
     "typecheck": "tsc -b --noEmit",
     "convex:dev": "convex dev --once",
-    "test:call-video": "vitest run --config vitest.config.ts"
+    "test:call-video": "vitest run --config vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.0",

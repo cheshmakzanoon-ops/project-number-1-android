@@ -1,5 +1,6 @@
 import { internalMutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { rateLimit } from "./policy";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   callAllowsScreenPublish,
@@ -30,7 +31,8 @@ const MAX_TTL_MS = 60_000;
 
 async function participantLive(ctx: Pick<QueryCtx, "db">, userId: Id<"users">, callId: Id<"calls">) {
   const call = await ctx.db.get(callId);
-  if (!call || !callAllowsScreenPublish(call.status)) return false;
+  if (!call || !callAllowsScreenPublish(call.status) ||
+      (call.status === "ringing" && Date.now() - call.startedAt >= 75_000) || !await ctx.db.get(userId)) return false;
   const participant = await ctx.db.query("callParticipants")
     .withIndex("by_call_user", (q) => q.eq("callId", callId).eq("userId", userId)).first();
   return participantMayPublishScreen(participant, call.initiatorId === userId);
@@ -59,6 +61,7 @@ export const insertHandoff = internalMutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     if (!await participantLive(ctx, args.userId, args.callId)) throw new Error("not_active_participant");
+    await rateLimit(ctx, args.userId, "screen-handoff", 6);
     // Drop this user's dead rows opportunistically so the table cannot grow
     // without bound (there is no scheduler in this app) — and, more
     // importantly, so a previous code can never be resurrected later.
@@ -108,6 +111,10 @@ export const consumeHandoff = internalMutation({
     if (!await participantLive(ctx, r.userId, r.callId)) return null;
     const user = await ctx.db.get(r.userId);
     if (!user) return null;
+    const previous = await ctx.db.query("screenShareHandoffs").withIndex("by_user", q => q.eq("userId", r.userId)).take(100);
+    for (const old of previous) {
+      if (old._id !== r._id && old.consumedAt != null) await ctx.db.delete(old._id);
+    }
     await ctx.db.patch(r._id, { consumedAt: now });
     return {
       sessionId: r._id,

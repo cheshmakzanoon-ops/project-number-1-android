@@ -1,6 +1,6 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
-import { describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import schema from "./schema";
@@ -30,8 +30,8 @@ let seq = 0;
 /** A throwaway identity with a working device token. */
 async function register(t: Harness, label: string) {
   seq += 1;
-  const token = `test-token-${label}-${seq}-${Math.random().toString(36).slice(2)}`;
-  const out = await t.mutation(api.users.register, {
+  const token = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  const out = await t.mutation(api.users.register, { inviteCode: "test-family-invite-code-for-automated-tests",
     token,
     displayName: `Test ${label}`,
   });
@@ -136,3 +136,6 @@ describe("already_in_call guard", () => {
     await t.mutation(api.calls.end, { callId: again, token: a.token, status: "missed" });
   });
 });
+
+beforeEach(() => vi.stubEnv("GARMA_FAMILY_INVITE_CODE", "test-family-invite-code-for-automated-tests"));
+afterEach(() => vi.unstubAllEnvs());

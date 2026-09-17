@@ -21,6 +21,10 @@ function livekitEnv() {
   const apiKey = e.LIVEKIT_API_KEY;
   const apiSecret = e.LIVEKIT_API_SECRET;
   if (!url || !apiKey || !apiSecret) throw new Error("livekit_not_configured");
+  const parsed = new URL(url);
+  if (parsed.protocol !== "wss:" || parsed.username || parsed.password || parsed.hash || parsed.search) {
+    throw new Error("livekit_not_configured");
+  }
   return { url, apiKey, apiSecret };
 }
 
@@ -56,6 +60,7 @@ export const getToken = action({
     if (!details || !details.isMine) throw new Error("unauthorized");
     const status = details.call.status;
     if (status !== "ringing" && status !== "active") throw new Error("unauthorized");
+    if (status === "ringing" && Date.now() - details.call.startedAt >= 75_000) throw new Error("call_not_live");
     if (!details.meIsInitiator && !details.meAccepted) throw new Error("unauthorized");
 
     const room = `call-${args.callId}`;

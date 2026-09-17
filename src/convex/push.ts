@@ -67,6 +67,9 @@ export const notifyIncomingCall = action({
     const pub = e.VAPID_PUBLIC_KEY;
     const priv = e.VAPID_PRIVATE_KEY;
     if (!pub || !priv) return { sent: 0, skipped: "vapid_not_configured" };
+    if (!(await ctx.runMutation(internal.pushSubs.claimIncoming, { token: args.token, callId: args.callId }))) {
+      return { sent: 0, skipped: "duplicate_or_expired_ring" };
+    }
     webpush.setVapidDetails("mailto:garma@freebuff.app", pub, priv);
 
     const callerName = me.displayName;
@@ -78,7 +81,7 @@ export const notifyIncomingCall = action({
       kind: details.call.kind,
       // Re-send on every ring: "renotify" in the service worker replaces
       // older identical-tag notifications and rings again.
-      timestamp: Date.now(),
+      timestamp: details.call.startedAt,
       title: isGroup
         ? details.call.kind === "video"
           ? "تماس گروهی تصویری گرما"
@@ -95,27 +98,33 @@ export const notifyIncomingCall = action({
     });
 
     let sent = 0;
-    for (const calleeId of calleeIds) {
-      const subs = await ctx.runQuery(internal.pushSubs.listSubscriptions, { userId: calleeId });
-      for (const s of subs) {
+    const devices = (await Promise.all(calleeIds.map(userId =>
+      ctx.runQuery(internal.pushSubs.listSubscriptions, { userId })))).flat();
+    // Bound concurrency and lifetime. Slow/dead devices cannot hold up all
+    // other recipients or deliver a new ring after the original call expired.
+    let cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(8, devices.length) }, async () => {
+      while (cursor < devices.length) {
+        const s = devices[cursor++];
+        const ttl = Math.min(45, Math.floor((details.call.startedAt + 75_000 - Date.now()) / 1000));
+        if (ttl <= 0) return;
         if (!validPushSubscription(s.endpoint, s.p256dh, s.auth)) continue;
         try {
           await webpush.sendNotification(
             { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
-            payload,
-            // High urgency = the OS may wake the device, play its default
-            // notification sound, and vibrate even when the screen is off.
-            { urgency: "high", TTL: 45, timeout: 10_000 },
+            payload, { urgency: "high", TTL: ttl, timeout: 10_000 },
           );
           sent++;
         } catch (err) {
           const status = (err as { statusCode?: number }).statusCode;
           if (status === 404 || status === 410) {
-            await ctx.runMutation(internal.pushSubs.pruneSubscription, { endpoint: s.endpoint });
+            try { await ctx.runMutation(internal.pushSubs.pruneSubscription, {
+              endpoint: s.endpoint, p256dh: s.p256dh, auth: s.auth,
+            }); } catch { /* a failed cleanup must not cancel other deliveries */ }
           }
         }
       }
-    }
+    }));
     return { sent };
   },
 });

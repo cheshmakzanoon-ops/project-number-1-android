@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { getFamilyInvite } from "../lib/token";
 import { ArrowLeft, Phone, ShieldCheck, Users } from "lucide-react";
 
 export function Signup({
@@ -6,12 +7,13 @@ export function Signup({
   busy,
   error = null,
 }: {
-  onRegister: (name: string) => void;
+  onRegister: (name: string, inviteCode: string) => void;
   busy: boolean;
   error?: string | null;
 }) {
   const [name, setName] = useState("");
-  const canGo = name.trim().length >= 2;
+  const [inviteCode, setInviteCode] = useState(getFamilyInvite);
+  const canGo = name.trim().length >= 2 && /^[A-Za-z0-9_-]{32,128}$/.test(inviteCode.trim());
 
   return (
     <div className="paper relative flex min-h-full flex-col bg-dusk-50">
@@ -37,8 +39,8 @@ export function Signup({
         </div>
 
         <p className="mt-7 max-w-[21rem] text-center text-base leading-8 text-dusk-700">
-          جای گرم همهٔ خانواده؛ هر کس فقط با نوشتن نامش وارد میشود و میتواند <b className="text-dusk-950">پیام بدهد</b>،
-          <b className="text-dusk-950"> تماس صوتی و تصویری</b> بگیرد و با چند نفر یک <b className="text-dusk-950">گروه</b> بسازد.
+          جای گرم همهٔ خانواده؛ با لینک دعوت و نوشتن نامت وارد شو، <b className="text-dusk-950">پیام بده</b>،
+          <b className="text-dusk-950"> تماس صوتی و تصویری</b> بگیر و با چند نفر یک <b className="text-dusk-950">گروه</b> بساز.
         </p>
 
         <div className="mt-8 w-full max-w-xs rounded-3xl border border-dusk-300/50 bg-dusk-100/90 p-2 shadow-lg shadow-black/30 backdrop-blur">
@@ -46,17 +48,26 @@ export function Signup({
             value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && canGo && !busy) onRegister(name.trim());
+              if (e.key === "Enter" && canGo && !busy) onRegister(name.trim(), inviteCode.trim());
             }}
             maxLength={40}
+            aria-label="نام نمایشی"
             placeholder="نامت را اینجا بنویس…"
             autoFocus
             className="h-14 w-full rounded-2xl bg-transparent px-4 text-center text-lg font-bold text-dusk-950 caret-ember-400 outline-none placeholder:font-normal placeholder:text-dusk-600"
           />
         </div>
 
+        <label className="mt-3 w-full max-w-xs text-sm text-dusk-700">
+          کد دعوت خانواده
+          <input aria-label="کد دعوت خانواده" type="password" autoComplete="off" dir="ltr"
+            value={inviteCode} onChange={e => setInviteCode(e.target.value)} maxLength={128}
+            placeholder="از لینک دعوت پر می‌شود"
+            className="mt-1 h-12 w-full rounded-2xl border border-dusk-300/50 bg-dusk-100 px-4 text-dusk-950" />
+          <span className="mt-1 block text-xs leading-5">این کد فقط برای ورود روی دستگاه جدید است؛ نامت رمز عبور نیست.</span>
+        </label>
         <button
-          onClick={() => canGo && onRegister(name.trim())}
+          onClick={() => canGo && onRegister(name.trim(), inviteCode.trim())}
           disabled={!canGo || busy}
           className={`mt-3 flex w-full max-w-xs items-center justify-center gap-2 rounded-full px-6 py-4 text-lg font-extrabold text-cocoa shadow-xl transition active:scale-[0.98] ${
             canGo && !busy

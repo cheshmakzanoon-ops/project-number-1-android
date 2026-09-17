@@ -475,7 +475,7 @@ export function Chat({
         mediaAttempts.current.set(args.blob, attempt);
         if (!attempt.storageId) {
           const up = await uploadUrlMut({ token });
-          attempt.storageId = await putStorageFile(up, args.blob);
+          attempt.storageId = await putStorageFile(up, args.blob, token);
         }
         const storageId = attempt.storageId;
         await send({

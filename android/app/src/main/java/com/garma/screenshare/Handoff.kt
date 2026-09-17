@@ -6,6 +6,8 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Timer
+import java.util.TimerTask
 
 /**
  * The restricted LiveKit credentials the server mints for one MediaProjection
@@ -51,14 +53,17 @@ object HandoffClient {
             .put("format", "json")
             .toString()
         val value = post("$convexUrl/api/action", body)
-        return ScreenShareCredentials(
+        val credentials = ScreenShareCredentials(
             url = value.getString("url"),
             token = value.getString("token"),
             room = value.getString("room"),
             identity = value.getString("identity"),
             sessionId = value.getString("sessionId"),
-            displayName = value.optString("displayName", ""),
+            displayName = value.optString("displayName", "").take(80),
         )
+        if (!HandoffPolicy.validCredentials(credentials.url, credentials.token, credentials.room,
+                credentials.identity, credentials.sessionId)) throw IOException("invalid_credentials")
+        return credentials
     }
 
     /** True while the server still allows this capture to publish. */
@@ -68,7 +73,7 @@ object HandoffClient {
             .put("args", JSONObject().put("sessionId", sessionId))
             .put("format", "json")
             .toString()
-        return post("$convexUrl/api/query", body).optBoolean("live", false)
+        return post("$convexUrl/api/query", body).opt("live") == true
     }
 
     private fun post(endpoint: String, body: String): JSONObject {
@@ -80,6 +85,12 @@ object HandoffClient {
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
         }
+        // A peer trickling response bytes must not keep an IO worker forever.
+        // Disconnect independently of the caller's coroutine cancellation.
+        val deadline = Timer("garma-handoff-deadline", true)
+        deadline.schedule(object : TimerTask() {
+            override fun run() { conn.disconnect() }
+        }, 20_000)
         try {
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             val status = conn.responseCode
@@ -105,6 +116,7 @@ object HandoffClient {
             }
             return json.getJSONObject("value")
         } finally {
+            deadline.cancel()
             conn.disconnect()
         }
     }

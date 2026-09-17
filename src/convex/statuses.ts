@@ -1,6 +1,8 @@
 import { mutation, query, type MutationCtx, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { userIdFromToken } from "./auth";
+import { mediaEndpoint, rateLimit } from "./policy";
+import { requireOwnedMedia } from "./uploads";
 import { deleteUnreferencedStorage } from "./storageCleanup";
 import type { Id } from "./_generated/dataModel";
 
@@ -32,7 +34,7 @@ type StatusRow = {
 type StatusOwner = { displayName: string; themeColor: string; lastSeenAt: number } | null;
 
 /** Project a raw statuses row into the client-facing shape. */
-async function statusView(ctx: QueryCtx, row: StatusRow, owner: StatusOwner) {
+async function statusView(ctx: QueryCtx, row: StatusRow, owner: StatusOwner, viewerId: Id<"users">) {
   const url =
     row.kind === "image" && row.storageId ? await ctx.storage.getUrl(row.storageId) : null;
   return {
@@ -44,7 +46,7 @@ async function statusView(ctx: QueryCtx, row: StatusRow, owner: StatusOwner) {
     storageId: row.storageId,
     createdAt: row.createdAt,
     expiresAt: row.createdAt + STATUS_TTL_MS,
-    viewers: row.viewers ?? [],
+    viewers: row.userId === viewerId ? row.viewers ?? [] : (row.viewers ?? []).filter(v => v.userId === viewerId),
     ownerId: row.userId,
     ownerName: owner?.displayName ?? "…",
     ownerColor: owner?.themeColor ?? "#8a6340",
@@ -89,10 +91,17 @@ export const post = mutation({
     body: v.optional(v.string()),
     storageId: v.optional(v.id("_storage")),
     mimeType: v.optional(v.string()),
+    clientPostId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
+    if (args.clientPostId !== undefined) {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(args.clientPostId)) throw new Error("invalid_client_id");
+      const existing = await ctx.db.query("statuses").withIndex("by_user_client", q => q.eq("userId", me).eq("clientPostId", args.clientPostId)).unique();
+      if (existing) return existing._id;
+    }
+    await rateLimit(ctx, me, "status", 10);
     await pruneMine(ctx, me);
     const now = Date.now();
     const kind = args.kind ?? "text";
@@ -105,6 +114,7 @@ export const post = mutation({
       .collect();
 
     if (kind === "text") {
+      if (args.storageId) throw new Error("invalid_media_type");
       const body = (args.body ?? "").trim();
       if (!body) throw new Error("empty_status");
       if (body.length > MAX_BODY) throw new Error("status_too_long");
@@ -113,6 +123,7 @@ export const post = mutation({
       }
       return await ctx.db.insert("statuses", {
         userId: me,
+        clientPostId: args.clientPostId,
         body,
         kind: "text",
         createdAt: now,
@@ -121,13 +132,16 @@ export const post = mutation({
     }
 
     if (!args.storageId) throw new Error("storage_required");
-    const body = (args.body ?? "").trim().slice(0, MAX_CAPTION);
+    const mimeType = await requireOwnedMedia(ctx, me, args.storageId, "image");
+    const body = (args.body ?? "").trim();
+    if (body.length > MAX_CAPTION) throw new Error("status_too_long");
     return await ctx.db.insert("statuses", {
       userId: me,
+      clientPostId: args.clientPostId,
       body,
       kind: "image",
       storageId: args.storageId,
-      mimeType: args.mimeType,
+      mimeType,
       createdAt: now,
       viewers: [],
     });
@@ -160,7 +174,7 @@ export const feed = query({
     const out: Awaited<ReturnType<typeof statusView>>[] = [];
     for (const row of rows) {
       if (row.userId === me) continue;
-      out.push(await statusView(ctx, row, await ctx.db.get(row.userId)));
+      out.push(await statusView(ctx, row, await ctx.db.get(row.userId), me));
     }
     return out;
   },
@@ -179,7 +193,7 @@ export const mine = query({
     const out: Awaited<ReturnType<typeof statusView>>[] = [];
     for (const row of rows) {
       if (row.userId !== me) continue;
-      out.push(await statusView(ctx, row, await ctx.db.get(row.userId)));
+      out.push(await statusView(ctx, row, await ctx.db.get(row.userId), me));
     }
     return out;
   },
@@ -198,7 +212,7 @@ export const forOwner = query({
     const out: Awaited<ReturnType<typeof statusView>>[] = [];
     for (const row of rows) {
       if (row.userId !== args.ownerId) continue;
-      out.push(await statusView(ctx, row, await ctx.db.get(row.userId)));
+      out.push(await statusView(ctx, row, await ctx.db.get(row.userId), me));
     }
     return out;
   },
@@ -227,20 +241,19 @@ export const view = mutation({
   },
 });
 
-/** Mints a signed Convex storage upload URL for image statuses. */
+/** Return the authenticated, bounded HTTP upload endpoint. */
 export const uploadUrl = mutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
     const me = await userIdFromToken(ctx, args.token);
     if (!me) throw new Error("unauthorized");
-    return await ctx.storage.generateUploadUrl();
+    return mediaEndpoint();
   },
 });
 
 /**
- * Housekeeping for statuses nobody is around to delete. There is no scheduler
- * in this app, so it piggybacks on the presence heartbeat every open client
- * already sends (see users.heartbeat), exactly like calls.cleanupStale.
+ * Authenticated compatibility endpoint; the server cron also performs cleanup
+ * when every family device is closed.
  */
 export const cleanupExpired = mutation({
   args: { token: v.string() },
@@ -248,6 +261,11 @@ export const cleanupExpired = mutation({
     const me = await userIdFromToken(ctx, args.token);
     if (!me) return;
     await pruneMine(ctx, me);
+    await cleanupStatuses(ctx);
+  },
+});
+
+export async function cleanupStatuses(ctx: MutationCtx) {
     const now = Date.now();
     const expired = await ctx.db
       .query("statuses")
@@ -258,5 +276,5 @@ export const cleanupExpired = mutation({
       await ctx.db.delete(s._id);
       await deleteUnreferencedStorage(ctx, s.storageId);
     }
-  },
-});
+
+}

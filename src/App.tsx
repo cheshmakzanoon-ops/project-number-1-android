@@ -3,7 +3,7 @@ import { useMutation } from "convex/react";
 import { Bell, BellRing, ExternalLink, X } from "lucide-react";
 import { api } from "./convex/_generated/api";
 import { IS_EMBEDDED, openAppTopLevel } from "./lib/browser";
-import { getDeviceToken } from "./lib/token";
+import { getDeviceToken, deviceTokenPersists, clearFamilyInvite } from "./lib/token";
 import { Signup } from "./components/Signup";
 import { Lobby } from "./components/Lobby";
 import { Chat } from "./components/Chat";
@@ -127,7 +127,7 @@ export function App() {
     params.delete("call");
     params.delete("callAction");
     const qs = params.toString();
-    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
+    window.history.replaceState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`);
     handleNotificationAction(callId, callAction);
   }, [handleNotificationAction]);
 
@@ -205,13 +205,20 @@ export function App() {
   }, [me?._id, token, heartbeat]);
 
   const handleRegister = useCallback(
-    async (name: string) => {
+    async (name: string, inviteCode: string) => {
       setBusy(true);
       setAuthErr(null);
       try {
-        await register({ token, displayName: name });
-      } catch {
-        setAuthErr("نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
+        if (!deviceTokenPersists()) throw new Error("storage_unavailable");
+        await register({ token, displayName: name, inviteCode });
+        clearFamilyInvite();
+      } catch (error) {
+        const message = String(error);
+        setAuthErr(/invite_required|invite_invalid/.test(message) ? "کد دعوت درست نیست؛ لینک دعوت خانواده را دوباره باز کن." :
+          /registration_not_configured/.test(message) ? "ورود اعضای جدید هنوز توسط صاحب برنامه فعال نشده است." :
+          /family_full/.test(message) ? "ظرفیت اعضای خانواده پر شده است؛ با صاحب برنامه تماس بگیر." :
+          /storage_unavailable/.test(message) ? "مرورگر نمی‌تواند ورودت را نگه دارد. حالت خصوصی را ببند و ذخیره‌سازی سایت را فعال کن." :
+          "نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");
       } finally {
         setBusy(false);
       }

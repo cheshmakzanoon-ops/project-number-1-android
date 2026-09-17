@@ -2,17 +2,22 @@
  * Closed/locked-device delivery depends on browser permission and OS policy.
  * A website cannot promise native full-screen incoming-call behavior.
  */
-const CACHE = "garma-shell-v7";
+const CACHE = "garma-shell-dev";
+const PRECACHE_ASSETS = []; // build-injected
 const SHELL = ["/", "/manifest.webmanifest", "/icons/icon.svg", "/icons/icon-192.png",
-  "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/icons/icon-maskable.png"];
+  "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/icons/icon-maskable.png", ...PRECACHE_ASSETS];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 self.addEventListener("activate", (event) => {
-  event.waitUntil(caches.keys().then((keys) => Promise.all(keys
-    .filter((key) => key.startsWith("garma-shell-") && key !== CACHE)
-    .map((key) => caches.delete(key)))).then(() => self.clients.claim()));
+  event.waitUntil((async () => {
+    const keys = (await caches.keys()).filter(key => key.startsWith("garma-shell-") && key !== CACHE);
+    // Keep one previous shell while already-open tabs finish using its hashed
+    // chunks. Updating a worker never reloads or interrupts an active call.
+    for (const key of keys.slice(0, -1)) await caches.delete(key);
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener("push", (event) => {
@@ -64,28 +69,49 @@ self.addEventListener("pushsubscriptionchange", (event) => {
     .then((clients) => { for (const client of clients) client.postMessage({ type: "push-subscription-changed" }); }));
 });
 
+async function networkWithDeadline(request) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try { return await fetch(request, { signal: controller.signal }); }
+  finally { clearTimeout(timer); }
+}
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
-  // Do not retain API responses, query-string commands, or arbitrary user media.
-  const cacheable = !url.search && (SHELL.includes(url.pathname) || url.pathname.startsWith("/assets/"));
+  // Private APIs, arbitrary media, and URL commands never enter the cache.
+  const cacheable = !url.search && SHELL.includes(url.pathname);
   if (!cacheable && req.mode !== "navigate") return;
-  const response = fetch(req);
-  if (cacheable) {
-    event.waitUntil(response.then(async (res) => {
-      if (res.ok) { const cache = await caches.open(CACHE); await cache.put(req, res.clone()); }
-    }).catch(() => {})); // quota/network failures must not break an otherwise valid response
-  }
-  event.respondWith(response.catch(async () => {
-    const cached = await caches.match(cacheable ? req : "/");
-    if (cached) return cached;
-    if (req.mode === "navigate") {
-      const shell = await caches.match("/");
-      if (shell) return shell;
+  event.respondWith((async () => {
+    // Storage can be disabled or evicted while the worker is still active.
+    const cache = await caches.open(CACHE).catch(() => null);
+    const match = async (key) => { try { return await cache?.match(key); } catch { return undefined; } };
+    // Vite asset names are content-addressed, so the precached copy is final.
+    if (cacheable && url.pathname.startsWith("/assets/")) {
+      const asset = await match(req);
+      if (asset) return asset;
     }
-    return new Response("Offline. Reconnect and try again.", { status: 503,
-      headers: { "Content-Type": "text/plain; charset=utf-8" } });
-  }));
+    try {
+      const response = await networkWithDeadline(req);
+      if (!response.ok && req.mode === "navigate") {
+        const shell = await match("/");
+        if (shell) return shell;
+      }
+      if (response.ok && cacheable && cache) {
+        try { await cache.put(req, response.clone()); } catch { /* quota: network still succeeds */ }
+      }
+      return response;
+    } catch {
+      const cached = await match(cacheable ? req : "/");
+      if (cached) return cached;
+      if (req.mode === "navigate") {
+        const shell = await match("/");
+        if (shell) return shell;
+      }
+      return new Response("آفلاین هستی؛ به اینترنت وصل شو و دوباره تلاش کن.", { status: 503,
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });
+    }
+  })());
 });

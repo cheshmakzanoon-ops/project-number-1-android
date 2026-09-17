@@ -275,6 +275,7 @@ export declare const api: {
       "public",
       {
         body?: string;
+        clientPostId?: string;
         kind?: "text" | "image";
         mimeType?: string;
         storageId?: Id<"_storage">;
@@ -317,13 +318,14 @@ export declare const api: {
     >;
   };
   users: {
+    familyInvite: FunctionReference<"query", "public", { token: string }, string>;
     directory: FunctionReference<"query", "public", { token?: string }, any>;
     heartbeat: FunctionReference<"mutation", "public", { token: string }, any>;
     me: FunctionReference<"query", "public", { token?: string }, any>;
     register: FunctionReference<
       "mutation",
       "public",
-      { displayName: string; token: string; whoami?: string },
+      { displayName: string; token: string; whoami?: string; inviteCode?: string },
       any
     >;
   };
@@ -338,9 +340,17 @@ export declare const api: {
  * ```
  */
 export declare const internal: {
+  maintenance: { sweep: FunctionReference<"mutation", "internal", {}, void> };
+  uploads: {
+    authorize: FunctionReference<"mutation", "internal", { token: string }, Id<"users">>;
+    record: FunctionReference<"mutation", "internal", { token: string; storageId: Id<"_storage">; mimeType: string }, void>;
+    cleanup: FunctionReference<"mutation", "internal", {}, void>;
+  };
+
   pushSubs: {
     listSubscriptions: FunctionReference<"query", "internal", { userId: Id<"users"> }, Array<{endpoint: string; p256dh: string; auth: string}>>;
-    pruneSubscription: FunctionReference<"mutation", "internal", { endpoint: string }, void>;
+    pruneSubscription: FunctionReference<"mutation", "internal", { endpoint: string; p256dh: string; auth: string }, void>;
+    claimIncoming: FunctionReference<"mutation", "internal", { token: string; callId: Id<"calls"> }, boolean>;
   };
   screenShare: {
     consumeHandoff: FunctionReference<

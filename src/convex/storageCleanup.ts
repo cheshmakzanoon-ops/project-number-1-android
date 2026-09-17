@@ -9,5 +9,9 @@ export async function deleteUnreferencedStorage(ctx: MutationCtx, storageId: Id<
       .filter(q => q.eq(q.field("deletedAt"), undefined)).first(),
     ctx.db.query("statuses").withIndex("by_storage", q => q.eq("storageId", storageId)).first(),
   ]);
-  if (!message && !status && await ctx.db.system.get(storageId)) await ctx.storage.delete(storageId);
+  if (!message && !status) {
+    const receipt = await ctx.db.query("uploads").withIndex("by_storage", q => q.eq("storageId", storageId)).unique();
+    if (receipt) await ctx.db.delete(receipt._id);
+    if (await ctx.db.system.get(storageId)) await ctx.storage.delete(storageId);
+  }
 }

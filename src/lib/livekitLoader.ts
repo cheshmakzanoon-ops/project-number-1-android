@@ -4,8 +4,8 @@
  * livekit-client is the single heaviest dependency in the app — roughly a
  * third of the entire JS bundle. It is only needed once a call actually
  * starts, so loading it on demand keeps the app shell (signup / lobby /
- * chat) from ever downloading or parsing it. That alone takes the biggest
- * bite out of the initial page load on phones.
+ * chat) from parsing it. The service worker precaches the compiled chunk
+ * after installation so a later call is not blocked by a missing asset.
  */
 
 export type LiveKitModule = typeof import("livekit-client");
@@ -19,6 +19,10 @@ export function loadLiveKit(): Promise<LiveKitModule> {
     pending = import("livekit-client").then((m) => {
       cached = m;
       return m;
+    }).catch((error: unknown) => {
+      // Network/chunk failures must not poison every subsequent redial.
+      pending = null;
+      throw error;
     });
   }
   return pending;

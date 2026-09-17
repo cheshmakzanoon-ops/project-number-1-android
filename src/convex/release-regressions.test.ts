@@ -1,6 +1,6 @@
 // @vitest-environment edge-runtime
 import { convexTest } from "convex-test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { validPushSubscription } from "../lib/pushValidation";
@@ -9,8 +9,8 @@ const modules = import.meta.glob(["./**/*.*s", "!./**/*.test.*s"]);
 const setup = () => convexTest(schema, modules);
 type Harness = ReturnType<typeof setup>;
 async function person(t: Harness, label: string) {
-  const token = `release-test-${label}-${crypto.randomUUID()}`;
-  const result = await t.mutation(api.users.register, { token, displayName: label });
+  const token = crypto.randomUUID().replaceAll("-", "").repeat(2);
+  const result = await t.mutation(api.users.register, { inviteCode: "test-family-invite-code-for-automated-tests",  token, displayName: label });
   return { token, id: result.user._id };
 }
 async function family() {
@@ -114,3 +114,6 @@ describe("push endpoint boundary",()=> {
     expect(validPushSubscription("https://fcm.googleapis.com/send","invalid","invalid")).toBe(false);
   });
 });
+
+beforeEach(() => vi.stubEnv("GARMA_FAMILY_INVITE_CODE", "test-family-invite-code-for-automated-tests"));
+afterEach(() => vi.unstubAllEnvs());

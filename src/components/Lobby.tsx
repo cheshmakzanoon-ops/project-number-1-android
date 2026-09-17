@@ -302,6 +302,7 @@ export function Lobby({
 
       <Suspense fallback={null}>
         <ContactSheet
+          token={token}
           open={sheet}
           onClose={() => setSheet(false)}
           contacts={directory ?? []}

@@ -61,14 +61,18 @@ export function objectUrlFor(blob: Blob): string {
 }
 
 /** Uploads use Convex's POST contract. The deadline also covers the response body. */
-export async function putStorageFile(uploadUrl: string, blob: Blob): Promise<string> {
+export const TRUSTED_UPLOAD_URL = "https://precise-ptarmigan-412.eu-west-1.convex.site/media/upload";
+export async function putStorageFile(uploadUrl: string, blob: Blob, token: string): Promise<string> {
+  if (uploadUrl !== TRUSTED_UPLOAD_URL || !token || token.length > 256) throw new Error("untrusted_upload_endpoint");
   if (!blob.size || blob.size > 10 * 1024 * 1024) throw new Error("file_too_large_or_empty");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 120_000);
   try {
     const res = await fetch(uploadUrl, {
       method: "POST",
-      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      headers: { "Content-Type": blob.type || "application/octet-stream", Authorization: `Bearer ${token}` },
+      credentials: "omit",
+      redirect: "error",
       body: blob,
       signal: controller.signal,
     });
