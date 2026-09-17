@@ -68,4 +68,9 @@ for i in $(seq 1 30); do
   sleep 1
 done
 curl -kfsS https://garma-ci.test/ >/dev/null
-node scripts/e2e/smoke.mjs
+# Keep independent acceptance reports: an attachment-hosting failure must not
+# prevent exercising calls, but any failed suite still fails the workflow.
+RESULT=0
+node scripts/e2e/calls.mjs || RESULT=1
+node scripts/e2e/smoke.mjs || RESULT=1
+exit "$RESULT"
