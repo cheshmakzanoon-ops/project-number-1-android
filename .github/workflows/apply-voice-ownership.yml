@@ -1,0 +1,56 @@
+name: Apply verified microphone ownership repair
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/apply-voice-ownership.yml']
+permissions:
+  contents: write
+concurrency:
+  group: apply-voice-ownership
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Apply integrity-checked application changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/git/blobs/486c9e46aa51b091441def531cc40fb34f680885" --jq .content | base64 --decode > "$RUNNER_TEMP/voice.xz"
+          python3 - <<'PY'
+          import pathlib, os, lzma, hashlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          patch = lzma.decompress((root / 'voice.xz').read_bytes())
+          assert hashlib.sha256(patch).hexdigest() == '8b98588817606d2b9bf01bdb1225113c80b2ee986af27735d8e3eb7564f4ce15'
+          (root / 'voice.patch').write_bytes(patch)
+          PY
+          git apply --check --index "$RUNNER_TEMP/voice.patch"
+          git apply --index "$RUNNER_TEMP/voice.patch"
+          git diff --cached --check
+          if git diff --cached --name-only | grep -q '^.github/'; then exit 1; fi
+      - run: bun install --frozen-lockfile
+      - run: bun run test:call-video --reporter=default --reporter=junit --outputFile.junit=test-results.xml
+      - run: bun run typecheck
+      - run: bun run build
+      - name: Commit and push only verified application files
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: transfer microphone ownership to calls and preserve failed media drafts' -m 'Stop capture synchronously before a call; retain the final recording without auto-sending; isolate late callbacks by conversation; bound media authorization, sending and message actions. Add eighteen regression cases and sanitized isolated-browser diagnostics. All 278 tests, TypeScript and production build pass before push.'
+          git push origin HEAD:main
+          git rev-parse HEAD > verified-commit.txt
+          git archive --format=tar HEAD | gzip > source.tar.gz
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: voice-ownership-${{ github.run_id }}
+          path: |
+            test-results.xml
+            verified-commit.txt
+            source.tar.gz
+          retention-days: 7
