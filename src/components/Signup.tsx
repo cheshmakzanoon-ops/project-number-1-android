@@ -13,7 +13,9 @@ export function Signup({
 }) {
   const [name, setName] = useState("");
   const [inviteCode, setInviteCode] = useState(getFamilyInvite);
-  const canGo = name.trim().length >= 2 && /^[A-Za-z0-9_-]{32,128}$/.test(inviteCode.trim());
+  // Same rule as the server (convex/policy.ts): the family keeps one short,
+  // memorable code, so only the character set and the outer bounds are checked.
+  const canGo = name.trim().length >= 2 && /^[A-Za-z0-9_-]{4,128}$/.test(inviteCode.trim());
 
   return (
     <div className="paper relative flex min-h-full flex-col bg-dusk-50">

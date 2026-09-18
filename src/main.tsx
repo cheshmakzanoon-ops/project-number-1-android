@@ -38,10 +38,13 @@ function sandboxConvexCandidate(): string | null {
  * listening there. Newer `convex dev` builds target the linked cloud
  * deployment directly and never open port 3210 — in that case the derived URL
  * answers with a proxy 502 and the app would sit on the "can't connect"
- * screen forever. So probe the candidate first: any non-5xx response means a
- * live server is behind it (Convex answers unknown GET paths with 4xx, which
- * is fine — the WebSocket upgrade that follows is what matters). A dead proxy
- * (5xx / network error / >2.5s hang) falls back to the canonical deployment
+ * screen forever. So probe the candidate first, and demand a real Convex
+ * answer: the standard `/version` endpoint returns 200 with a short plain-text
+ * version body, while a proxy with nothing behind the port answers with an
+ * error page (or 200 + HTML). Only a non-empty, non-HTML 200 is treated as a
+ * live backend — a status-code-only check let a dead sandbox URL through, and
+ * the app then pointed its WebSocket at it and showed "اتصال برقرار نشد" even
+ * though the canonical deployment was reachable. A dead candidate falls back
  * with no user-visible wait beyond the probe.
  */
 async function resolveConvexUrl(): Promise<string> {
@@ -50,12 +53,15 @@ async function resolveConvexUrl(): Promise<string> {
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), 2500);
   try {
-    const res = await fetch(candidate, {
+    const res = await fetch(`${candidate}/version`, {
       cache: "no-store",
       mode: "cors",
       signal: ctrl.signal,
     });
-    if (res.status < 500) return candidate;
+    if (res.ok) {
+      const body = (await res.text()).trim();
+      if (body && !body.startsWith("<")) return candidate;
+    }
   } catch {
     /* not reachable → canonical below */
   } finally {

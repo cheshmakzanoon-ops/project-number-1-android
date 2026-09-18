@@ -117,7 +117,11 @@ export declare const api: {
     markRead: FunctionReference<
       "mutation",
       "public",
-      { conversationId: Id<"conversations">; token: string; throughId?: Id<"messages"> },
+      {
+        conversationId: Id<"conversations">;
+        throughId?: Id<"messages">;
+        token: string;
+      },
       any
     >;
     myConversations: FunctionReference<
@@ -142,6 +146,14 @@ export declare const api: {
       "mutation",
       "public",
       { memberIds: Array<Id<"users">>; token: string },
+      any
+    >;
+  };
+  deployment: {
+    readiness: FunctionReference<
+      "action",
+      "public",
+      { frontendOrigin: string },
       any
     >;
   };
@@ -234,18 +246,6 @@ export declare const api: {
     vapidPublicKey: FunctionReference<"action", "public", {}, any>;
   };
   pushSubs: {
-    listSubscriptions: FunctionReference<
-      "query",
-      "public",
-      { userId: Id<"users"> },
-      any
-    >;
-    pruneSubscription: FunctionReference<
-      "mutation",
-      "public",
-      { endpoint: string },
-      any
-    >;
     removeSubscription: FunctionReference<
       "mutation",
       "public",
@@ -330,14 +330,19 @@ export declare const api: {
     >;
   };
   users: {
-    familyInvite: FunctionReference<"query", "public", { token: string }, string>;
     directory: FunctionReference<"query", "public", { token?: string }, any>;
+    familyInvite: FunctionReference<"query", "public", { token: string }, any>;
     heartbeat: FunctionReference<"mutation", "public", { token: string }, any>;
     me: FunctionReference<"query", "public", { token?: string }, any>;
     register: FunctionReference<
       "mutation",
       "public",
-      { displayName: string; token: string; whoami?: string; inviteCode?: string },
+      {
+        displayName: string;
+        inviteCode?: string;
+        token: string;
+        whoami?: string;
+      },
       any
     >;
   };
@@ -352,13 +357,29 @@ export declare const api: {
  * ```
  */
 export declare const internal: {
-  maintenance: { sweep: FunctionReference<"mutation", "internal", {}, void> };
-  uploads: {
-    authorize: FunctionReference<"mutation", "internal", { token: string }, Id<"users">>;
-    record: FunctionReference<"mutation", "internal", { token: string; storageId: Id<"_storage">; mimeType: string }, void>;
-    cleanup: FunctionReference<"mutation", "internal", {}, void>;
+  maintenance: {
+    sweep: FunctionReference<"mutation", "internal", {}, any>;
   };
-
+  pushSubs: {
+    claimIncoming: FunctionReference<
+      "mutation",
+      "internal",
+      { callId: Id<"calls">; token: string },
+      any
+    >;
+    listSubscriptions: FunctionReference<
+      "query",
+      "internal",
+      { userId: Id<"users"> },
+      any
+    >;
+    pruneSubscription: FunctionReference<
+      "mutation",
+      "internal",
+      { auth: string; endpoint: string; p256dh: string },
+      any
+    >;
+  };
   screenShare: {
     consumeHandoff: FunctionReference<
       "mutation",
@@ -375,6 +396,21 @@ export declare const internal: {
         ttlMs?: number;
         userId: Id<"users">;
       },
+      any
+    >;
+  };
+  uploads: {
+    authorize: FunctionReference<
+      "mutation",
+      "internal",
+      { token: string },
+      any
+    >;
+    cleanup: FunctionReference<"mutation", "internal", {}, any>;
+    record: FunctionReference<
+      "mutation",
+      "internal",
+      { mimeType: string; storageId: Id<"_storage">; token: string },
       any
     >;
   };

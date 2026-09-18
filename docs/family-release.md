@@ -22,7 +22,7 @@ Set these **server-side Convex environment variables** on that deployment:
 
 | Variable | Required value |
 | --- | --- |
-| `GARMA_FAMILY_INVITE_CODE` | A cryptographically random URL-safe secret, 32–128 characters: letters, digits, `_` or `-` |
+| `GARMA_FAMILY_INVITE_CODE` | The family enrollment code, 4–128 characters: letters, digits, `_` or `-`. The owner may deliberately keep one short, memorable value; it is still a credential and must stay out of Git, builds and public messages |
 | `GARMA_ALLOWED_ORIGINS` | The exact HTTPS frontend origin; comma-separated only when multiple trusted origins are deliberately supported; no wildcard |
 | `LIVEKIT_URL` | The existing reachable `wss://` media endpoint, without embedded credentials, query or fragment |
 | `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | A matching server credential pair for that LiveKit service |

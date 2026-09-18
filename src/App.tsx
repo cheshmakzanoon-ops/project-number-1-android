@@ -234,6 +234,10 @@ export function App() {
         const message = String(error);
         setAuthErr(/invite_required|invite_invalid/.test(message) ? "کد دعوت درست نیست؛ لینک دعوت خانواده را دوباره باز کن." :
           /registration_not_configured/.test(message) ? "ورود اعضای جدید هنوز توسط صاحب برنامه فعال نشده است." :
+          // A backend built before private enrollment does not accept the
+          // invite argument at all. Saying that plainly beats the generic
+          // "check your internet" line, which hid the real cause.
+          /ArgumentValidation|extra field|not in the validator|Could not find (public )?function/.test(message) ? "سرورِ متصل به این برنامه به‌روزرسانی نشده است؛ تا سرور به‌روزرسانی نشود کد دعوت کار نمی‌کند." :
           /family_full/.test(message) ? "ظرفیت اعضای خانواده پر شده است؛ با صاحب برنامه تماس بگیر." :
           /storage_unavailable/.test(message) ? "مرورگر نمی‌تواند ورودت را نگه دارد. حالت خصوصی را ببند و ذخیره‌سازی سایت را فعال کن." :
           "نتونستیم به سرور وصل شویم — اتصال اینترنت را بررسی کن و دوباره تلاش کن.");

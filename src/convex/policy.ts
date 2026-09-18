@@ -4,18 +4,27 @@ import type { Id } from "./_generated/dataModel";
 
 export const MAX_FAMILY_USERS = 100;
 export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
-export const API_VERSION = "2026-09-17.3";
+export const API_VERSION = "2026-09-17.4";
+
+/**
+ * The family enrollment code is a privacy barrier for one small family, not a
+ * password: the owner keeps one short, memorable value that can be said aloud,
+ * so a short code is valid configuration. What protects enrollment is that the
+ * code is never published, only authenticated members can read it back, and
+ * membership is capped — not the length of the string.
+ */
+export const INVITE_CODE_PATTERN = /^[A-Za-z0-9_-]{4,128}$/;
 
 /** Configuration has no permissive production default. Existing sessions survive. */
 export function familyInviteCode(): string {
   const expected = (env as unknown as Record<string, string | undefined>).GARMA_FAMILY_INVITE_CODE;
-  if (!expected || !/^[A-Za-z0-9_-]{32,128}$/.test(expected)) throw new Error("registration_not_configured");
+  if (!expected || !INVITE_CODE_PATTERN.test(expected)) throw new Error("registration_not_configured");
   return expected;
 }
 
 export async function requireFamilyInvite(invite: string | undefined): Promise<void> {
   const expected = familyInviteCode();
-  if (!invite || !/^[A-Za-z0-9_-]{32,128}$/.test(invite)) throw new Error("invite_required");
+  if (!invite || !INVITE_CODE_PATTERN.test(invite)) throw new Error("invite_required");
   const digest = async (s: string) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
   const [a, b] = await Promise.all([digest(expected), digest(invite)]);
   let difference = 0;

@@ -32,5 +32,10 @@ it("does not mistake a query-string credential for a supported invite fragment",
   expect((await import("./token")).getFamilyInvite()).toBe("");
 });
 it("discards malformed invitation fragments",async()=>{
-  history.replaceState(null,"","/#invite=short");expect((await import("./token")).getFamilyInvite()).toBe("");expect(location.hash).toBe("");
+  history.replaceState(null,"","/#invite=abc");expect((await import("./token")).getFamilyInvite()).toBe("");expect(location.hash).toBe("");
+});
+it("keeps the family's short permanent code from the fragment",async()=>{
+  history.replaceState(null,"","/#invite=2258432");
+  expect((await import("./token")).getFamilyInvite()).toBe("2258432");
+  expect(location.hash).toBe("");
 });

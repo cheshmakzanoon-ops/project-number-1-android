@@ -29,7 +29,7 @@ export function getFamilyInvite(): string {
       params.delete("invite");
       const fragment = params.toString();
       window.history.replaceState(null, "", window.location.pathname + window.location.search + (fragment ? `#${fragment}` : ""));
-      inviteCache = /^[A-Za-z0-9_-]{32,128}$/.test(invite) ? invite : "";
+      inviteCache = /^[A-Za-z0-9_-]{4,128}$/.test(invite) ? invite : "";
       try { sessionStorage.setItem("garma.pending-invite", inviteCache); } catch { /* page memory */ }
       return inviteCache;
     }

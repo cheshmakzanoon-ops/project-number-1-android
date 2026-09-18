@@ -100,7 +100,7 @@ export function ContactSheet({
     try {
       const code = await withTimeout(client.query(api.users.familyInvite, { token }), 12_000, "invite_timeout");
       if (!owner.alive) return;
-      if (!/^[A-Za-z0-9_-]{32,128}$/.test(code)) throw new Error("invalid_invite");
+      if (!/^[A-Za-z0-9_-]{4,128}$/.test(code)) throw new Error("invalid_invite");
       const url = window.location.origin + "/#invite=" + encodeURIComponent(code);
       let didCopy = false;
       try {

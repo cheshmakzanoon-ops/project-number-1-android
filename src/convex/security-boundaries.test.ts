@@ -63,6 +63,13 @@ describe("device credentials and private enrollment",()=> {
     await expect(t.mutation(api.users.register,{token:"a".repeat(64),displayName:"Dad",inviteCode})).rejects.toThrow(/invite_(required|invalid)/);
     expect(await t.run(ctx=>ctx.db.query("sessions").collect())).toHaveLength(0);
   });
+  it("accepts the family's short permanent code and still rejects a near miss",async()=> {
+    vi.stubEnv("GARMA_FAMILY_INVITE_CODE","2258432"); const t=setup();
+    const result=await t.mutation(api.users.register,{token:"a".repeat(64),displayName:"Dad",inviteCode:"2258432"});
+    expect(result.isNew).toBe(true);
+    await expect(t.mutation(api.users.register,{token:"b".repeat(64),displayName:"Mum",inviteCode:"2258433"})).rejects.toThrow("invite_invalid");
+    expect(await t.run(ctx=>ctx.db.query("users").collect())).toHaveLength(1);
+  });
   it("fails closed when the operator has not configured private enrollment",async()=> {
     vi.stubEnv("GARMA_FAMILY_INVITE_CODE",""); const t=setup();
     await expect(t.mutation(api.users.register,{token:"a".repeat(64),displayName:"Dad",inviteCode:INVITE})).rejects.toThrow("registration_not_configured");
