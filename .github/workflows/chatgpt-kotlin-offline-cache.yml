@@ -1,0 +1,160 @@
+name: ChatGPT Kotlin Offline Cache
+
+on:
+  push:
+    branches:
+      - chatgpt/android-sdk-bootstrap-20260928
+    paths:
+      - .github/workflows/chatgpt-kotlin-offline-cache.yml
+
+permissions:
+  contents: read
+
+jobs:
+  cache-kotlin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android API 36
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Install Gradle 9.6
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 https://services.gradle.org/distributions/gradle-9.6.0-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-home"
+
+      - name: Build built-in Kotlin Android smoke app
+        shell: bash
+        run: |
+          set -euxo pipefail
+          P="$RUNNER_TEMP/kotlin-smoke"
+          mkdir -p "$P/app/src/main/java/dev/chatgpt/cache"
+
+          cat > "$P/settings.gradle.kts" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "KotlinCacheSmoke"
+          include(":app")
+          EOF
+
+          cat > "$P/build.gradle.kts" <<'EOF'
+          plugins {
+              id("com.android.application") version "9.4.0" apply false
+          }
+          EOF
+
+          cat > "$P/gradle.properties" <<'EOF'
+          android.builtInKotlin=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF
+
+          cat > "$P/app/build.gradle.kts" <<'EOF'
+          plugins {
+              id("com.android.application")
+          }
+          android {
+              namespace = "dev.chatgpt.cache"
+              compileSdk = 36
+              defaultConfig {
+                  applicationId = "dev.chatgpt.cache"
+                  minSdk = 26
+                  targetSdk = 36
+                  versionCode = 1
+                  versionName = "1"
+              }
+          }
+          EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$P/app/src/main/java/dev/chatgpt/cache/MainActivity.kt" <<'EOF'
+          package dev.chatgpt.cache
+          import android.app.Activity
+          import android.os.Bundle
+          import android.widget.TextView
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(TextView(this).apply { text = "Kotlin cache ready" })
+              }
+          }
+          EOF
+
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-user-home"
+          export ANDROID_HOME="$ANDROID_HOME"
+          cd "$P"
+          "$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle" --no-daemon :app:assembleDebug
+          test -s app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Package Kotlin resolution cache
+        shell: bash
+        run: |
+          set -euxo pipefail
+          C="$RUNNER_TEMP/gradle-user-home/caches"
+          OUT="$RUNNER_TEMP/out"
+          STAGE="$RUNNER_TEMP/stage"
+          mkdir -p "$OUT" "$STAGE/caches/modules-2/files-2.1" "$STAGE/caches/modules-2"
+
+          cp -a "$C/modules-2/files-2.1/org.jetbrains.kotlin" "$STAGE/caches/modules-2/files-2.1/"
+          cp -a "$C/modules-2/files-2.1/org.jetbrains" "$STAGE/caches/modules-2/files-2.1/" || true
+
+          for D in "$C"/modules-2/metadata-*; do
+            [ -d "$D/descriptors/org.jetbrains.kotlin" ] || continue
+            REL="${D#$C/modules-2/}"
+            mkdir -p "$STAGE/caches/modules-2/$REL/descriptors"
+            cp -a "$D/descriptors/org.jetbrains.kotlin" "$STAGE/caches/modules-2/$REL/descriptors/"
+            if [ -d "$D/descriptors/org.jetbrains" ]; then
+              cp -a "$D/descriptors/org.jetbrains" "$STAGE/caches/modules-2/$REL/descriptors/"
+            fi
+          done
+
+          tar -C "$STAGE" -czf "$OUT/kotlin-offline-cache.tar.gz" caches
+          sha256sum "$OUT/kotlin-offline-cache.tar.gz" > "$OUT/SHA256SUMS"
+          du -h "$OUT/kotlin-offline-cache.tar.gz"
+          find "$STAGE/caches/modules-2/files-2.1/org.jetbrains.kotlin" -mindepth 2 -maxdepth 2 -type d -printf '%P\n' | sort > "$OUT/modules.txt"
+
+      - name: Upload cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-offline-cache
+          path: |
+            ${{ runner.temp }}/out/kotlin-offline-cache.tar.gz
+            ${{ runner.temp }}/out/SHA256SUMS
+            ${{ runner.temp }}/out/modules.txt
+          compression-level: 0
