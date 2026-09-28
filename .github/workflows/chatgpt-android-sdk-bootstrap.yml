@@ -1,4 +1,4 @@
-name: ChatGPT Android System Image Raw Transfer
+name: ChatGPT Android 17 Compose Bootstrap
 
 on:
   push:
@@ -7,88 +7,233 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  repack-system-image:
+  android17-compose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download validated emulator artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install current Android CLI
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/chunks"
-          gh run download 36465817518 --name android-emulator --dir "$RUNNER_TEMP/source"
-          tar -xzf "$RUNNER_TEMP/source/android-emulator.tar.gz" -C "$RUNNER_TEMP/unpacked"
-          du -sh "$RUNNER_TEMP/unpacked/system-images"
-          find "$RUNNER_TEMP/unpacked/system-images" -maxdepth 5 -type f -printf '%p %s\n' | sort
+          curl -fsSL https://dl.google.com/android/cli/latest/linux_x86_64/install.sh -o "$RUNNER_TEMP/android-cli-install.sh"
+          bash "$RUNNER_TEMP/android-cli-install.sh"
+          export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+          ANDROID_BIN="$(command -v android || true)"
+          if [ -z "$ANDROID_BIN" ]; then
+            ANDROID_BIN="$(find "$HOME" -type f -name android -perm -u+x -print -quit)"
+          fi
+          test -n "$ANDROID_BIN"
+          ANDROID_REAL="$(readlink -f "$ANDROID_BIN")"
+          echo "ANDROID_BIN=$ANDROID_REAL" >> "$GITHUB_ENV"
+          "$ANDROID_REAL" --version
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$ANDROID_REAL" "$RUNNER_TEMP/out/android-cli"
+          chmod +x "$RUNNER_TEMP/out/android-cli"
 
-      - name: Create sparse raw tar chunks
+      - name: Install API 37 SDK with Android CLI
         shell: bash
         run: |
           set -euxo pipefail
-          tar --sparse -cf "$RUNNER_TEMP/system-images.raw.tar" -C "$RUNNER_TEMP/unpacked" system-images
-          sha256sum "$RUNNER_TEMP/system-images.raw.tar" > "$RUNNER_TEMP/chunks/SHA256SUMS"
-          stat -c '%n %s bytes' "$RUNNER_TEMP/system-images.raw.tar" >> "$RUNNER_TEMP/chunks/SHA256SUMS"
-          split -b 350M -d -a 2 "$RUNNER_TEMP/system-images.raw.tar" "$RUNNER_TEMP/chunks/system-images.raw.part-"
-          ls -lh "$RUNNER_TEMP/chunks"
+          SDK="$RUNNER_TEMP/android-sdk37"
+          mkdir -p "$SDK"
+          "$ANDROID_BIN" --sdk="$SDK" sdk list --all --canary "platforms/*" | tee "$RUNNER_TEMP/out/platforms.txt"
+          "$ANDROID_BIN" --sdk="$SDK" sdk install --canary             platforms/android-37             sources/android-37             build-tools/36.0.0             platform-tools
+          "$ANDROID_BIN" --sdk="$SDK" sdk list | tee "$RUNNER_TEMP/out/sdk37-installed.txt"
 
-      - name: Upload part 00
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-00, path: "${{ runner.temp }}/chunks/system-images.raw.part-00", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 01
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-01, path: "${{ runner.temp }}/chunks/system-images.raw.part-01", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 02
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-02, path: "${{ runner.temp }}/chunks/system-images.raw.part-02", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 03
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-03, path: "${{ runner.temp }}/chunks/system-images.raw.part-03", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 04
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-04, path: "${{ runner.temp }}/chunks/system-images.raw.part-04", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 05
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-05, path: "${{ runner.temp }}/chunks/system-images.raw.part-05", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 06
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-06, path: "${{ runner.temp }}/chunks/system-images.raw.part-06", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 07
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-07, path: "${{ runner.temp }}/chunks/system-images.raw.part-07", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 08
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-08, path: "${{ runner.temp }}/chunks/system-images.raw.part-08", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 09
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-09, path: "${{ runner.temp }}/chunks/system-images.raw.part-09", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 10
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-10, path: "${{ runner.temp }}/chunks/system-images.raw.part-10", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 11
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-11, path: "${{ runner.temp }}/chunks/system-images.raw.part-11", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 12
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-12, path: "${{ runner.temp }}/chunks/system-images.raw.part-12", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 13
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-13, path: "${{ runner.temp }}/chunks/system-images.raw.part-13", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 14
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-14, path: "${{ runner.temp }}/chunks/system-images.raw.part-14", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload part 15
-        uses: actions/upload-artifact@v4
-        with: { name: android-system-raw-15, path: "${{ runner.temp }}/chunks/system-images.raw.part-15", compression-level: 0, if-no-files-found: ignore }
+      - name: Install Gradle 9.6
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 https://services.gradle.org/distributions/gradle-9.6.0-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-home"
 
-      - name: Upload manifest
+      - name: Build current Jetpack Compose smoke app
+        shell: bash
+        run: |
+          set -euxo pipefail
+          P="$RUNNER_TEMP/compose-smoke"
+          mkdir -p "$P/app/src/main/java/dev/chatgpt/composecheck"
+
+          cat > "$P/settings.gradle.kts" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "ComposeSmoke"
+          include(":app")
+          EOF
+
+          cat > "$P/build.gradle.kts" <<'EOF'
+          buildscript {
+              dependencies {
+                  classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.4.10")
+              }
+          }
+
+          plugins {
+              id("com.android.application") version "9.4.0" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.4.10" apply false
+          }
+          EOF
+
+          cat > "$P/app/build.gradle.kts" <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "dev.chatgpt.composecheck"
+              compileSdk = 37
+
+              defaultConfig {
+                  applicationId = "dev.chatgpt.composecheck"
+                  minSdk = 23
+                  targetSdk = 37
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+          }
+
+          dependencies {
+              val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
+              implementation(composeBom)
+              androidTestImplementation(composeBom)
+
+              implementation("androidx.activity:activity-compose:1.13.0")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              debugImplementation("androidx.compose.ui:ui-tooling")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+              androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+              debugImplementation("androidx.compose.ui:ui-test-manifest")
+          }
+          EOF
+
+          cat > "$P/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:label="Compose Smoke">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$P/app/src/main/java/dev/chatgpt/composecheck/MainActivity.kt" <<'EOF'
+          package dev.chatgpt.composecheck
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.Surface
+          import androidx.compose.material3.Text
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme {
+                          Surface {
+                              Text("Compose 2026.09 OK")
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          export ANDROID_HOME="$RUNNER_TEMP/android-sdk37"
+          export ANDROID_SDK_ROOT="$RUNNER_TEMP/android-sdk37"
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-compose-cache"
+          cd "$P"
+          "$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle" --no-daemon :app:assembleDebug
+          test -s "$P/app/build/outputs/apk/debug/app-debug.apk"
+          cp "$P/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/out/compose-smoke-debug.apk"
+
+      - name: Package API 37 and Compose cache
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OUT="$RUNNER_TEMP/out"
+          SDK="$RUNNER_TEMP/android-sdk37"
+
+          tar -C "$SDK" -czf "$OUT/android-api37.tar.gz"             platforms/android-37 sources/android-37
+          tar -C "$RUNNER_TEMP" -czf "$OUT/compose-gradle-cache.tar.gz"             gradle-compose-cache
+
+          split -b 350M -d -a 2 "$OUT/compose-gradle-cache.tar.gz" "$OUT/compose-cache.part-"
+          rm "$OUT/compose-gradle-cache.tar.gz"
+
+          sha256sum "$OUT/android-api37.tar.gz" "$OUT/android-cli" "$OUT/compose-smoke-debug.apk" "$OUT"/compose-cache.part-* > "$OUT/SHA256SUMS"
+          ls -lh "$OUT"
+
+      - name: Upload API 37
         uses: actions/upload-artifact@v4
         with:
-          name: android-system-raw-manifest
-          path: ${{ runner.temp }}/chunks/SHA256SUMS
+          name: android-api37
+          path: |
+            ${{ runner.temp }}/out/android-api37.tar.gz
+            ${{ runner.temp }}/out/platforms.txt
+            ${{ runner.temp }}/out/sdk37-installed.txt
+          compression-level: 0
+
+      - name: Upload Android CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-cli-current
+          path: ${{ runner.temp }}/out/android-cli
+          compression-level: 0
+
+      - name: Upload Compose cache 00
+        uses: actions/upload-artifact@v4
+        with: { name: compose-cache-00, path: "${{ runner.temp }}/out/compose-cache.part-00", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload Compose cache 01
+        uses: actions/upload-artifact@v4
+        with: { name: compose-cache-01, path: "${{ runner.temp }}/out/compose-cache.part-01", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload Compose cache 02
+        uses: actions/upload-artifact@v4
+        with: { name: compose-cache-02, path: "${{ runner.temp }}/out/compose-cache.part-02", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload Compose cache 03
+        uses: actions/upload-artifact@v4
+        with: { name: compose-cache-03, path: "${{ runner.temp }}/out/compose-cache.part-03", compression-level: 0, if-no-files-found: ignore }
+
+      - name: Upload Compose proof APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-smoke
+          path: |
+            ${{ runner.temp }}/out/compose-smoke-debug.apk
+            ${{ runner.temp }}/out/SHA256SUMS
+          compression-level: 0
