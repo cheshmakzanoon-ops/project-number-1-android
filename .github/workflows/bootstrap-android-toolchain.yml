@@ -1,0 +1,85 @@
+name: Bootstrap portable Android toolchain
+
+on:
+  push:
+    branches:
+      - tooling/android-sdk-bootstrap
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install             "cmdline-tools;latest"             "platform-tools"             "platforms;android-37"             "build-tools;36.0.0"             "ndk;28.2.13676358"             "cmake;3.22.1"             "emulator"             "system-images;android-37;google_apis;x86_64"
+
+      - name: Download Gradle 9.8.0
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 3 -o /tmp/gradle-9.8.0-bin.zip https://services.gradle.org/distributions/gradle-9.8.0-bin.zip
+
+      - name: Package toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -d "$SDK"
+          tar -C "$SDK" -czf /tmp/android-sdk-core.tar.gz             cmdline-tools platform-tools platforms build-tools licenses
+          tar -C "$SDK" -czf /tmp/android-sdk-native.tar.gz ndk cmake
+          tar -C "$SDK" -czf /tmp/android-sdk-emulator.tar.gz emulator system-images
+          tar -C "$(dirname "$JAVA_HOME")" -czf /tmp/jdk17.tar.gz "$(basename "$JAVA_HOME")"
+          sha256sum             /tmp/android-sdk-core.tar.gz             /tmp/android-sdk-native.tar.gz             /tmp/android-sdk-emulator.tar.gz             /tmp/jdk17.tar.gz             /tmp/gradle-9.8.0-bin.zip > /tmp/SHA256SUMS
+          du -h /tmp/android-sdk-*.tar.gz /tmp/jdk17.tar.gz /tmp/gradle-9.8.0-bin.zip
+
+      - name: Upload Android SDK core
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-sdk-core
+          path: |
+            /tmp/android-sdk-core.tar.gz
+            /tmp/SHA256SUMS
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Android native toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-sdk-native
+          path: /tmp/android-sdk-native.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Android emulator toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-sdk-emulator
+          path: /tmp/android-sdk-emulator.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload JDK 17
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-jdk17
+          path: /tmp/jdk17.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Gradle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-9.8.0
+          path: /tmp/gradle-9.8.0-bin.zip
+          compression-level: 0
+          retention-days: 1
