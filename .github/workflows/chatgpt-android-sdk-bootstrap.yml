@@ -1,4 +1,4 @@
-name: ChatGPT Android Toolchain Transfer Split
+name: ChatGPT Android System Image Raw Transfer
 
 on:
   push:
@@ -10,90 +10,85 @@ permissions:
   actions: read
 
 jobs:
-  split-toolchain-artifacts:
+  repack-system-image:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Download validated toolchain artifacts
+      - name: Download validated emulator artifact
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$RUNNER_TEMP/source/native" "$RUNNER_TEMP/source/emulator" "$RUNNER_TEMP/chunks"
-          gh run download 36465817518 --name android-native --dir "$RUNNER_TEMP/source/native"
-          gh run download 36465817518 --name android-emulator --dir "$RUNNER_TEMP/source/emulator"
-          ls -lh "$RUNNER_TEMP/source/native" "$RUNNER_TEMP/source/emulator"
+          mkdir -p "$RUNNER_TEMP/source" "$RUNNER_TEMP/unpacked" "$RUNNER_TEMP/chunks"
+          gh run download 36465817518 --name android-emulator --dir "$RUNNER_TEMP/source"
+          tar -xzf "$RUNNER_TEMP/source/android-emulator.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          du -sh "$RUNNER_TEMP/unpacked/system-images"
+          find "$RUNNER_TEMP/unpacked/system-images" -maxdepth 5 -type f -printf '%p %s\n' | sort
 
-      - name: Split large archives and package real JDK 17
+      - name: Create sparse raw tar chunks
         shell: bash
         run: |
           set -euxo pipefail
-          CHUNKS="$RUNNER_TEMP/chunks"
-          split -b 400M -d -a 2 "$RUNNER_TEMP/source/native/android-native.tar.gz" "$CHUNKS/android-native.part-"
-          split -b 400M -d -a 2 "$RUNNER_TEMP/source/emulator/android-emulator.tar.gz" "$CHUNKS/android-emulator.part-"
+          tar --sparse -cf "$RUNNER_TEMP/system-images.raw.tar" -C "$RUNNER_TEMP/unpacked" system-images
+          sha256sum "$RUNNER_TEMP/system-images.raw.tar" > "$RUNNER_TEMP/chunks/SHA256SUMS"
+          stat -c '%n %s bytes' "$RUNNER_TEMP/system-images.raw.tar" >> "$RUNNER_TEMP/chunks/SHA256SUMS"
+          split -b 350M -d -a 2 "$RUNNER_TEMP/system-images.raw.tar" "$RUNNER_TEMP/chunks/system-images.raw.part-"
+          ls -lh "$RUNNER_TEMP/chunks"
 
-          JAVA_REAL="$(readlink -f "$JAVA_HOME")"
-          tar -C "$(dirname "$JAVA_REAL")" -czf "$CHUNKS/jdk17-real.tar.gz" "$(basename "$JAVA_REAL")"
+      - name: Upload part 00
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-00, path: "${{ runner.temp }}/chunks/system-images.raw.part-00", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-01, path: "${{ runner.temp }}/chunks/system-images.raw.part-01", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-02, path: "${{ runner.temp }}/chunks/system-images.raw.part-02", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-03, path: "${{ runner.temp }}/chunks/system-images.raw.part-03", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 04
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-04, path: "${{ runner.temp }}/chunks/system-images.raw.part-04", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 05
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-05, path: "${{ runner.temp }}/chunks/system-images.raw.part-05", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 06
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-06, path: "${{ runner.temp }}/chunks/system-images.raw.part-06", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 07
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-07, path: "${{ runner.temp }}/chunks/system-images.raw.part-07", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 08
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-08, path: "${{ runner.temp }}/chunks/system-images.raw.part-08", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 09
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-09, path: "${{ runner.temp }}/chunks/system-images.raw.part-09", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 10
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-10, path: "${{ runner.temp }}/chunks/system-images.raw.part-10", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 11
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-11, path: "${{ runner.temp }}/chunks/system-images.raw.part-11", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 12
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-12, path: "${{ runner.temp }}/chunks/system-images.raw.part-12", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 13
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-13, path: "${{ runner.temp }}/chunks/system-images.raw.part-13", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 14
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-14, path: "${{ runner.temp }}/chunks/system-images.raw.part-14", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload part 15
+        uses: actions/upload-artifact@v4
+        with: { name: android-system-raw-15, path: "${{ runner.temp }}/chunks/system-images.raw.part-15", compression-level: 0, if-no-files-found: ignore }
 
-          sha256sum "$CHUNKS"/* > "$CHUNKS/SHA256SUMS"
-          ls -lh "$CHUNKS"
-
-      - name: Upload native part 00
-        uses: actions/upload-artifact@v4
-        with: { name: android-native-part-00, path: "${{ runner.temp }}/chunks/android-native.part-00", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload native part 01
-        uses: actions/upload-artifact@v4
-        with: { name: android-native-part-01, path: "${{ runner.temp }}/chunks/android-native.part-01", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload native part 02
-        uses: actions/upload-artifact@v4
-        with: { name: android-native-part-02, path: "${{ runner.temp }}/chunks/android-native.part-02", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload native part 03
-        uses: actions/upload-artifact@v4
-        with: { name: android-native-part-03, path: "${{ runner.temp }}/chunks/android-native.part-03", compression-level: 0, if-no-files-found: ignore }
-
-      - name: Upload emulator part 00
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-00, path: "${{ runner.temp }}/chunks/android-emulator.part-00", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 01
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-01, path: "${{ runner.temp }}/chunks/android-emulator.part-01", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 02
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-02, path: "${{ runner.temp }}/chunks/android-emulator.part-02", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 03
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-03, path: "${{ runner.temp }}/chunks/android-emulator.part-03", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 04
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-04, path: "${{ runner.temp }}/chunks/android-emulator.part-04", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 05
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-05, path: "${{ runner.temp }}/chunks/android-emulator.part-05", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 06
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-06, path: "${{ runner.temp }}/chunks/android-emulator.part-06", compression-level: 0, if-no-files-found: ignore }
-      - name: Upload emulator part 07
-        uses: actions/upload-artifact@v4
-        with: { name: android-emulator-part-07, path: "${{ runner.temp }}/chunks/android-emulator.part-07", compression-level: 0, if-no-files-found: ignore }
-
-      - name: Upload JDK 17
+      - name: Upload manifest
         uses: actions/upload-artifact@v4
         with:
-          name: jdk17-real
-          path: ${{ runner.temp }}/chunks/jdk17-real.tar.gz
-          compression-level: 0
-
-      - name: Upload checksums
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-transfer-checksums
+          name: android-system-raw-manifest
           path: ${{ runner.temp }}/chunks/SHA256SUMS
