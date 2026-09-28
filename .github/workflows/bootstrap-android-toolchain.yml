@@ -44,7 +44,6 @@ jobs:
             "ndk;28.2.13676358" \
             "cmake;3.22.1" \
             "emulator" \
-            "system-images;android-36;google_apis;x86_64"
 
       - name: Download Gradle 9.8.0
         shell: bash
@@ -117,25 +116,25 @@ jobs:
         run: |
           set -euxo pipefail
           SDK="$ANDROID_SDK_ROOT"
-          tar -C "$SDK" -czf /tmp/android-sdk-core.tar.gz \
+          tar -C "$SDK" -cf /tmp/android-sdk-core.tar \
             cmdline-tools platform-tools platforms build-tools licenses
-          tar -C "$SDK" -czf /tmp/android-sdk-native.tar.gz ndk cmake
-          tar -C "$SDK" -czf /tmp/android-sdk-emulator.tar.gz emulator system-images
-          tar -C "$(dirname "$JAVA_HOME")" -czf /tmp/jdk17.tar.gz "$(basename "$JAVA_HOME")"
+          tar -C "$SDK" -cf /tmp/android-sdk-native.tar ndk cmake
+          tar -C "$SDK" -cf /tmp/android-sdk-emulator.tar emulator
+          tar -C "$(dirname "$JAVA_HOME")" -cf /tmp/jdk17.tar "$(basename "$JAVA_HOME")"
           sha256sum \
-            /tmp/android-sdk-core.tar.gz \
-            /tmp/android-sdk-native.tar.gz \
-            /tmp/android-sdk-emulator.tar.gz \
-            /tmp/jdk17.tar.gz \
+            /tmp/android-sdk-core.tar \
+            /tmp/android-sdk-native.tar \
+            /tmp/android-sdk-emulator.tar \
+            /tmp/jdk17.tar \
             /tmp/gradle-9.8.0-bin.zip > /tmp/SHA256SUMS
-          du -h /tmp/android-sdk-*.tar.gz /tmp/jdk17.tar.gz /tmp/gradle-9.8.0-bin.zip
+          du -h /tmp/android-sdk-*.tar /tmp/jdk17.tar /tmp/gradle-9.8.0-bin.zip
 
       - name: Upload Android SDK core
         uses: actions/upload-artifact@v4
         with:
           name: android-sdk-core
           path: |
-            /tmp/android-sdk-core.tar.gz
+            /tmp/android-sdk-core.tar
             /tmp/SHA256SUMS
           compression-level: 0
           retention-days: 1
@@ -144,7 +143,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-sdk-native
-          path: /tmp/android-sdk-native.tar.gz
+          path: /tmp/android-sdk-native.tar
           compression-level: 0
           retention-days: 1
 
@@ -152,7 +151,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-sdk-emulator
-          path: /tmp/android-sdk-emulator.tar.gz
+          path: /tmp/android-sdk-emulator.tar
           compression-level: 0
           retention-days: 1
 
@@ -160,7 +159,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-jdk17
-          path: /tmp/jdk17.tar.gz
+          path: /tmp/jdk17.tar
           compression-level: 0
           retention-days: 1
 
