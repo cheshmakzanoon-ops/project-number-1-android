@@ -1,4 +1,4 @@
-name: ChatGPT Android SDK Bootstrap
+name: ChatGPT Android Toolchain Transfer Split
 
 on:
   push:
@@ -7,11 +7,12 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  package-android-toolchain:
+  split-toolchain-artifacts:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -21,198 +22,78 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Download and install Android SDK packages
+      - name: Download validated toolchain artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euxo pipefail
-          SDK="$RUNNER_TEMP/android-sdk"
-          mkdir -p "$SDK/cmdline-tools" "$RUNNER_TEMP/out"
+          mkdir -p "$RUNNER_TEMP/source/native" "$RUNNER_TEMP/source/emulator" "$RUNNER_TEMP/chunks"
+          gh run download 36465817518 --name android-native --dir "$RUNNER_TEMP/source/native"
+          gh run download 36465817518 --name android-emulator --dir "$RUNNER_TEMP/source/emulator"
+          ls -lh "$RUNNER_TEMP/source/native" "$RUNNER_TEMP/source/emulator"
 
-          curl -fL --retry 5             https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip             -o "$RUNNER_TEMP/cmdline-tools.zip"
-          echo "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583  $RUNNER_TEMP/cmdline-tools.zip" | sha256sum -c -
-
-          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP/cmdline-unpack"
-          mkdir -p "$SDK/cmdline-tools/latest"
-          mv "$RUNNER_TEMP/cmdline-unpack/cmdline-tools/"* "$SDK/cmdline-tools/latest/"
-
-          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
-
-          "$SDKMANAGER" --sdk_root="$SDK"             "platform-tools"             "platforms;android-36"             "build-tools;36.0.0"             "sources;android-36"             "ndk;28.2.13676358"             "cmake;3.22.1"             "emulator"
-
-          # Android 17 / API 37 is still exposed as preview in the SDK repository.
-          # Install it when available, but do not make the stable toolchain depend on it.
-          "$SDKMANAGER" --sdk_root="$SDK" --channel=3             "platforms;android-37" "sources;android-37" || true
-
-          "$SDKMANAGER" --sdk_root="$SDK"             "system-images;android-36;google_apis;x86_64"
-
-          {
-            echo "sdkmanager=$("$SDKMANAGER" --version)"
-            echo "java=$(java -version 2>&1 | head -1)"
-            echo "java_home=$JAVA_HOME"
-            echo "installed-packages:"
-            "$SDKMANAGER" --sdk_root="$SDK" --list_installed
-          } > "$RUNNER_TEMP/out/manifest.txt"
-
-      - name: Download Gradle 9.6
+      - name: Split large archives and package real JDK 17
         shell: bash
         run: |
           set -euxo pipefail
-          curl -fL --retry 5 https://services.gradle.org/distributions/gradle-9.6.0-bin.zip -o "$RUNNER_TEMP/gradle.zip"
-          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-home"
-          "$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle" --version
+          CHUNKS="$RUNNER_TEMP/chunks"
+          split -b 400M -d -a 2 "$RUNNER_TEMP/source/native/android-native.tar.gz" "$CHUNKS/android-native.part-"
+          split -b 400M -d -a 2 "$RUNNER_TEMP/source/emulator/android-emulator.tar.gz" "$CHUNKS/android-emulator.part-"
 
-      - name: Verify a real native Android build
-        shell: bash
-        run: |
-          set -euxo pipefail
-          SDK="$RUNNER_TEMP/android-sdk"
-          GRADLE="$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle"
-          PROJECT="$RUNNER_TEMP/smoke"
-          mkdir -p "$PROJECT/app/src/main/java/dev/chatgpt/smoke"
+          JAVA_REAL="$(readlink -f "$JAVA_HOME")"
+          tar -C "$(dirname "$JAVA_REAL")" -czf "$CHUNKS/jdk17-real.tar.gz" "$(basename "$JAVA_REAL")"
 
-          cat > "$PROJECT/settings.gradle.kts" <<'EOF'
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          rootProject.name = "AndroidToolchainSmoke"
-          include(":app")
-          EOF
+          sha256sum "$CHUNKS"/* > "$CHUNKS/SHA256SUMS"
+          ls -lh "$CHUNKS"
 
-          cat > "$PROJECT/build.gradle.kts" <<'EOF'
-          plugins {
-              id("com.android.application") version "9.4.0" apply false
-          }
-          EOF
-
-          cat > "$PROJECT/app/build.gradle.kts" <<'EOF'
-          plugins {
-              id("com.android.application")
-          }
-
-          android {
-              namespace = "dev.chatgpt.smoke"
-              compileSdk = 36
-
-              defaultConfig {
-                  applicationId = "dev.chatgpt.smoke"
-                  minSdk = 23
-                  targetSdk = 36
-                  versionCode = 1
-                  versionName = "1.0"
-              }
-          }
-          EOF
-
-          cat > "$PROJECT/app/src/main/AndroidManifest.xml" <<'EOF'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-              <application android:theme="@android:style/Theme.Material.Light.NoActionBar">
-                  <activity android:name=".MainActivity" android:exported="true">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-
-          cat > "$PROJECT/app/src/main/java/dev/chatgpt/smoke/MainActivity.java" <<'EOF'
-          package dev.chatgpt.smoke;
-
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  TextView view = new TextView(this);
-                  view.setText("Android toolchain OK");
-                  setContentView(view);
-              }
-          }
-          EOF
-
-          export ANDROID_HOME="$SDK"
-          export ANDROID_SDK_ROOT="$SDK"
-          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-user-home"
-          cd "$PROJECT"
-          "$GRADLE" --no-daemon :app:assembleDebug
-          test -s "$PROJECT/app/build/outputs/apk/debug/app-debug.apk"
-          cp "$PROJECT/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/out/smoke-debug.apk"
-
-      - name: Package toolchain
-        shell: bash
-        run: |
-          set -euxo pipefail
-          SDK="$RUNNER_TEMP/android-sdk"
-          OUT="$RUNNER_TEMP/out"
-
-          tar -C "$SDK" -czf "$OUT/android-sdk-core.tar.gz"             cmdline-tools platform-tools build-tools platforms sources licenses
-          tar -C "$SDK" -czf "$OUT/android-native.tar.gz" ndk cmake
-          tar -C "$SDK" -czf "$OUT/android-emulator.tar.gz" emulator system-images
-          tar -C "$RUNNER_TEMP/gradle-home" -czf "$OUT/gradle-9.6.0.tar.gz" gradle-9.6.0
-          tar -C "$(dirname "$JAVA_HOME")" -czf "$OUT/jdk17.tar.gz" "$(basename "$JAVA_HOME")"
-          tar -C "$RUNNER_TEMP" -czf "$OUT/gradle-cache.tar.gz" gradle-user-home
-
-          ls -lh "$OUT"
-          sha256sum "$OUT"/*.tar.gz "$OUT"/*.apk > "$OUT/SHA256SUMS"
-
-      - name: Upload SDK core
+      - name: Upload native part 00
         uses: actions/upload-artifact@v4
-        with:
-          name: android-sdk-core
-          path: |
-            ${{ runner.temp }}/out/android-sdk-core.tar.gz
-            ${{ runner.temp }}/out/manifest.txt
-            ${{ runner.temp }}/out/smoke-debug.apk
-            ${{ runner.temp }}/out/SHA256SUMS
-          compression-level: 0
-
-      - name: Upload native toolchain
+        with: { name: android-native-part-00, path: "${{ runner.temp }}/chunks/android-native.part-00", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload native part 01
         uses: actions/upload-artifact@v4
-        with:
-          name: android-native
-          path: ${{ runner.temp }}/out/android-native.tar.gz
-          compression-level: 0
-
-      - name: Upload emulator toolchain
+        with: { name: android-native-part-01, path: "${{ runner.temp }}/chunks/android-native.part-01", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload native part 02
         uses: actions/upload-artifact@v4
-        with:
-          name: android-emulator
-          path: ${{ runner.temp }}/out/android-emulator.tar.gz
-          compression-level: 0
-
-      - name: Upload Gradle
+        with: { name: android-native-part-02, path: "${{ runner.temp }}/chunks/android-native.part-02", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload native part 03
         uses: actions/upload-artifact@v4
-        with:
-          name: gradle-9-6
-          path: ${{ runner.temp }}/out/gradle-9.6.0.tar.gz
-          compression-level: 0
+        with: { name: android-native-part-03, path: "${{ runner.temp }}/chunks/android-native.part-03", compression-level: 0, if-no-files-found: ignore }
+
+      - name: Upload emulator part 00
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-00, path: "${{ runner.temp }}/chunks/android-emulator.part-00", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 01
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-01, path: "${{ runner.temp }}/chunks/android-emulator.part-01", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 02
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-02, path: "${{ runner.temp }}/chunks/android-emulator.part-02", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 03
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-03, path: "${{ runner.temp }}/chunks/android-emulator.part-03", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 04
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-04, path: "${{ runner.temp }}/chunks/android-emulator.part-04", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 05
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-05, path: "${{ runner.temp }}/chunks/android-emulator.part-05", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 06
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-06, path: "${{ runner.temp }}/chunks/android-emulator.part-06", compression-level: 0, if-no-files-found: ignore }
+      - name: Upload emulator part 07
+        uses: actions/upload-artifact@v4
+        with: { name: android-emulator-part-07, path: "${{ runner.temp }}/chunks/android-emulator.part-07", compression-level: 0, if-no-files-found: ignore }
 
       - name: Upload JDK 17
         uses: actions/upload-artifact@v4
         with:
-          name: jdk17
-          path: ${{ runner.temp }}/out/jdk17.tar.gz
+          name: jdk17-real
+          path: ${{ runner.temp }}/chunks/jdk17-real.tar.gz
           compression-level: 0
 
-      - name: Upload seeded Gradle cache
+      - name: Upload checksums
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-offline-cache
-          path: ${{ runner.temp }}/out/gradle-cache.tar.gz
-          compression-level: 0
+          name: android-transfer-checksums
+          path: ${{ runner.temp }}/chunks/SHA256SUMS
