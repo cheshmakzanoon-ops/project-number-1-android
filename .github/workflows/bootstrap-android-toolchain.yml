@@ -39,12 +39,12 @@ jobs:
           sdkmanager --sdk_root="$ANDROID_SDK_ROOT" --install \
             "cmdline-tools;latest" \
             "platform-tools" \
-            "platforms;android-37" \
+            "platforms;android-36" \
             "build-tools;36.0.0" \
             "ndk;28.2.13676358" \
             "cmake;3.22.1" \
             "emulator" \
-            "system-images;android-37;google_apis;x86_64"
+            "system-images;android-36;google_apis;x86_64"
 
       - name: Download Gradle 9.8.0
         shell: bash
@@ -52,6 +52,65 @@ jobs:
           set -euxo pipefail
           curl -fL --retry 3 -o /tmp/gradle-9.8.0-bin.zip \
             https://services.gradle.org/distributions/gradle-9.8.0-bin.zip
+
+      - name: Verify Android build and warm Gradle cache
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf /tmp/gradle-dist /tmp/android-smoke
+          mkdir -p /tmp/gradle-dist /tmp/android-smoke/app/src/main
+          unzip -q /tmp/gradle-9.8.0-bin.zip -d /tmp/gradle-dist
+          cat > /tmp/android-smoke/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AndroidSmoke"
+          include(":app")
+          EOF
+          cat > /tmp/android-smoke/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "9.4.0" apply false
+          }
+          EOF
+          mkdir -p /tmp/android-smoke/app
+          cat > /tmp/android-smoke/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+          }
+          android {
+              namespace = "dev.android.smoke"
+              compileSdk = 36
+              defaultConfig {
+                  applicationId = "dev.android.smoke"
+                  minSdk = 23
+                  targetSdk = 36
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+          }
+          EOF
+          cat > /tmp/android-smoke/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Android Smoke" />
+          </manifest>
+          EOF
+          /tmp/gradle-dist/gradle-9.8.0/bin/gradle -p /tmp/android-smoke --no-daemon :app:assembleDebug
+          test -s /tmp/android-smoke/app/build/outputs/apk/debug/app-debug.apk
+          tar -C "$HOME" -czf /tmp/android-gradle-cache.tar.gz .gradle/caches
+          cp -a /tmp/android-smoke /tmp/android-smoke-project
+          rm -rf /tmp/android-smoke-project/.gradle /tmp/android-smoke-project/app/build
+          tar -C /tmp -czf /tmp/android-smoke-project.tar.gz android-smoke-project
 
       - name: Package toolchain
         shell: bash
@@ -110,5 +169,15 @@ jobs:
         with:
           name: gradle-9.8.0
           path: /tmp/gradle-9.8.0-bin.zip
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload Gradle offline cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-gradle-cache
+          path: |
+            /tmp/android-gradle-cache.tar.gz
+            /tmp/android-smoke-project.tar.gz
           compression-level: 0
           retention-days: 1
