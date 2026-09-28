@@ -38,16 +38,13 @@ jobs:
           SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
 
-          "$SDKMANAGER" --sdk_root="$SDK"             "platform-tools"             "platforms;android-37"             "platforms;android-36"             "build-tools;36.0.0"             "sources;android-37"             "ndk;28.2.13676358"             "cmake;3.22.1"             "emulator"
+          "$SDKMANAGER" --sdk_root="$SDK"             "platform-tools"             "platforms;android-36"             "build-tools;36.0.0"             "sources;android-36"             "ndk;28.2.13676358"             "cmake;3.22.1"             "emulator"
 
-          if "$SDKMANAGER" --sdk_root="$SDK" --list | grep -Fq "system-images;android-37;google_apis;x86_64"; then
-            "$SDKMANAGER" --sdk_root="$SDK" "system-images;android-37;google_apis;x86_64"
-          elif "$SDKMANAGER" --sdk_root="$SDK" --list | grep -Fq "system-images;android-36;google_apis;x86_64"; then
-            "$SDKMANAGER" --sdk_root="$SDK" "system-images;android-36;google_apis;x86_64"
-          else
-            echo "No requested x86_64 Google APIs image found" >&2
-            exit 1
-          fi
+          # Android 17 / API 37 is still exposed as preview in the SDK repository.
+          # Install it when available, but do not make the stable toolchain depend on it.
+          "$SDKMANAGER" --sdk_root="$SDK" --channel=3             "platforms;android-37" "sources;android-37" || true
+
+          "$SDKMANAGER" --sdk_root="$SDK"             "system-images;android-36;google_apis;x86_64"
 
           {
             echo "sdkmanager=$("$SDKMANAGER" --version)"
@@ -106,12 +103,12 @@ jobs:
 
           android {
               namespace = "dev.chatgpt.smoke"
-              compileSdk = 37
+              compileSdk = 36
 
               defaultConfig {
                   applicationId = "dev.chatgpt.smoke"
                   minSdk = 23
-                  targetSdk = 37
+                  targetSdk = 36
                   versionCode = 1
                   versionName = "1.0"
               }
