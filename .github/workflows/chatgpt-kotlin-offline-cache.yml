@@ -141,6 +141,7 @@ jobs:
           mkdir -p "$OUT" "$STAGE/caches/modules-2/files-2.1" "$STAGE/caches/modules-2"
 
           cp -a "$C/modules-2/files-2.1/org.jetbrains.kotlin" "$STAGE/caches/modules-2/files-2.1/"
+          cp -a "$C/modules-2/files-2.1/org.jetbrains.kotlinx" "$STAGE/caches/modules-2/files-2.1/" || true
           cp -a "$C/modules-2/files-2.1/org.jetbrains" "$STAGE/caches/modules-2/files-2.1/" || true
 
           for D in "$C"/modules-2/metadata-*; do
@@ -148,6 +149,9 @@ jobs:
             REL="${D#$C/modules-2/}"
             mkdir -p "$STAGE/caches/modules-2/$REL/descriptors"
             cp -a "$D/descriptors/org.jetbrains.kotlin" "$STAGE/caches/modules-2/$REL/descriptors/"
+            if [ -d "$D/descriptors/org.jetbrains.kotlinx" ]; then
+              cp -a "$D/descriptors/org.jetbrains.kotlinx" "$STAGE/caches/modules-2/$REL/descriptors/"
+            fi
             if [ -d "$D/descriptors/org.jetbrains" ]; then
               cp -a "$D/descriptors/org.jetbrains" "$STAGE/caches/modules-2/$REL/descriptors/"
             fi
