@@ -1,0 +1,221 @@
+name: ChatGPT Android SDK Bootstrap
+
+on:
+  push:
+    branches:
+      - chatgpt/android-sdk-bootstrap-20260928
+
+permissions:
+  contents: read
+
+jobs:
+  package-android-toolchain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download and install Android SDK packages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$RUNNER_TEMP/android-sdk"
+          mkdir -p "$SDK/cmdline-tools" "$RUNNER_TEMP/out"
+
+          curl -fL --retry 5             https://dl.google.com/android/repository/commandlinetools-linux-15859902_latest.zip             -o "$RUNNER_TEMP/cmdline-tools.zip"
+          echo "4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583  $RUNNER_TEMP/cmdline-tools.zip" | sha256sum -c -
+
+          unzip -q "$RUNNER_TEMP/cmdline-tools.zip" -d "$RUNNER_TEMP/cmdline-unpack"
+          mkdir -p "$SDK/cmdline-tools/latest"
+          mv "$RUNNER_TEMP/cmdline-unpack/cmdline-tools/"* "$SDK/cmdline-tools/latest/"
+
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
+
+          "$SDKMANAGER" --sdk_root="$SDK"             "platform-tools"             "platforms;android-37"             "platforms;android-36"             "build-tools;36.0.0"             "sources;android-37"             "ndk;28.2.13676358"             "cmake;3.22.1"             "emulator"
+
+          if "$SDKMANAGER" --sdk_root="$SDK" --list | grep -Fq "system-images;android-37;google_apis;x86_64"; then
+            "$SDKMANAGER" --sdk_root="$SDK" "system-images;android-37;google_apis;x86_64"
+          elif "$SDKMANAGER" --sdk_root="$SDK" --list | grep -Fq "system-images;android-36;google_apis;x86_64"; then
+            "$SDKMANAGER" --sdk_root="$SDK" "system-images;android-36;google_apis;x86_64"
+          else
+            echo "No requested x86_64 Google APIs image found" >&2
+            exit 1
+          fi
+
+          {
+            echo "sdkmanager=$("$SDKMANAGER" --version)"
+            echo "java=$(java -version 2>&1 | head -1)"
+            echo "java_home=$JAVA_HOME"
+            echo "installed-packages:"
+            "$SDKMANAGER" --sdk_root="$SDK" --list_installed
+          } > "$RUNNER_TEMP/out/manifest.txt"
+
+      - name: Download Gradle 9.6
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 https://services.gradle.org/distributions/gradle-9.6.0-bin.zip -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-home"
+          "$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle" --version
+
+      - name: Verify a real native Android build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$RUNNER_TEMP/android-sdk"
+          GRADLE="$RUNNER_TEMP/gradle-home/gradle-9.6.0/bin/gradle"
+          PROJECT="$RUNNER_TEMP/smoke"
+          mkdir -p "$PROJECT/app/src/main/java/dev/chatgpt/smoke"
+
+          cat > "$PROJECT/settings.gradle.kts" <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "AndroidToolchainSmoke"
+          include(":app")
+          EOF
+
+          cat > "$PROJECT/build.gradle.kts" <<'EOF'
+          plugins {
+              id("com.android.application") version "9.4.0" apply false
+          }
+          EOF
+
+          cat > "$PROJECT/app/build.gradle.kts" <<'EOF'
+          plugins {
+              id("com.android.application")
+          }
+
+          android {
+              namespace = "dev.chatgpt.smoke"
+              compileSdk = 37
+
+              defaultConfig {
+                  applicationId = "dev.chatgpt.smoke"
+                  minSdk = 23
+                  targetSdk = 37
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+          }
+          EOF
+
+          cat > "$PROJECT/app/src/main/AndroidManifest.xml" <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > "$PROJECT/app/src/main/java/dev/chatgpt/smoke/MainActivity.java" <<'EOF'
+          package dev.chatgpt.smoke;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  TextView view = new TextView(this);
+                  view.setText("Android toolchain OK");
+                  setContentView(view);
+              }
+          }
+          EOF
+
+          export ANDROID_HOME="$SDK"
+          export ANDROID_SDK_ROOT="$SDK"
+          export GRADLE_USER_HOME="$RUNNER_TEMP/gradle-user-home"
+          cd "$PROJECT"
+          "$GRADLE" --no-daemon :app:assembleDebug
+          test -s "$PROJECT/app/build/outputs/apk/debug/app-debug.apk"
+          cp "$PROJECT/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/out/smoke-debug.apk"
+
+      - name: Package toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="$RUNNER_TEMP/android-sdk"
+          OUT="$RUNNER_TEMP/out"
+
+          tar -C "$SDK" -czf "$OUT/android-sdk-core.tar.gz"             cmdline-tools platform-tools build-tools platforms sources licenses
+          tar -C "$SDK" -czf "$OUT/android-native.tar.gz" ndk cmake
+          tar -C "$SDK" -czf "$OUT/android-emulator.tar.gz" emulator system-images
+          tar -C "$RUNNER_TEMP/gradle-home" -czf "$OUT/gradle-9.6.0.tar.gz" gradle-9.6.0
+          tar -C "$(dirname "$JAVA_HOME")" -czf "$OUT/jdk17.tar.gz" "$(basename "$JAVA_HOME")"
+          tar -C "$RUNNER_TEMP" -czf "$OUT/gradle-cache.tar.gz" gradle-user-home
+
+          ls -lh "$OUT"
+          sha256sum "$OUT"/*.tar.gz "$OUT"/*.apk > "$OUT/SHA256SUMS"
+
+      - name: Upload SDK core
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-sdk-core
+          path: |
+            ${{ runner.temp }}/out/android-sdk-core.tar.gz
+            ${{ runner.temp }}/out/manifest.txt
+            ${{ runner.temp }}/out/smoke-debug.apk
+            ${{ runner.temp }}/out/SHA256SUMS
+          compression-level: 0
+
+      - name: Upload native toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native
+          path: ${{ runner.temp }}/out/android-native.tar.gz
+          compression-level: 0
+
+      - name: Upload emulator toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-emulator
+          path: ${{ runner.temp }}/out/android-emulator.tar.gz
+          compression-level: 0
+
+      - name: Upload Gradle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-9-6
+          path: ${{ runner.temp }}/out/gradle-9.6.0.tar.gz
+          compression-level: 0
+
+      - name: Upload JDK 17
+        uses: actions/upload-artifact@v4
+        with:
+          name: jdk17
+          path: ${{ runner.temp }}/out/jdk17.tar.gz
+          compression-level: 0
+
+      - name: Upload seeded Gradle cache
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-offline-cache
+          path: ${{ runner.temp }}/out/gradle-cache.tar.gz
+          compression-level: 0
